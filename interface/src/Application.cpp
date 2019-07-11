@@ -104,6 +104,7 @@
 #include <hfm/ModelFormatRegistry.h>
 #include <model-networking/ModelCacheScriptingInterface.h>
 #include <material-networking/TextureCacheScriptingInterface.h>
+#include <material-networking/MaterialCache.h>
 #include <ModelEntityItem.h>
 #include <NetworkAccessManager.h>
 #include <NetworkingConstants.h>
@@ -547,6 +548,13 @@ public:
                 return true;
             }
 
+            if (message->message == WM_POWERBROADCAST) {
+                if (message->wParam == PBT_APMRESUMEAUTOMATIC) {
+                    qCInfo(interfaceapp) << "Waking up from sleep or hybernation.";
+                    QMetaObject::invokeMethod(DependencyManager::get<NodeList>().data(), "noteAwakening", Qt::QueuedConnection);
+                }
+            }
+
             if (message->message == WM_COPYDATA) {
                 COPYDATASTRUCT* pcds = (COPYDATASTRUCT*)(message->lParam);
                 QUrl url = QUrl((const char*)(pcds->lpData));
@@ -831,6 +839,8 @@ bool setupEssentials(int& argc, char** argv, bool runningMarkerExisted) {
     QCoreApplication::addLibraryPath(audioDLLPath);
 #endif 
 
+    QString defaultScriptsOverrideOption = getCmdOption(argc, constArgv, "--defaultScriptsOverride");
+
     DependencyManager::registerInheritance<LimitedNodeList, NodeList>();
     DependencyManager::registerInheritance<AvatarHashMap, AvatarManager>();
     DependencyManager::registerInheritance<EntityDynamicFactoryInterface, InterfaceDynamicFactory>();
@@ -852,7 +862,7 @@ bool setupEssentials(int& argc, char** argv, bool runningMarkerExisted) {
     DependencyManager::set<AccountManager>(std::bind(&Application::getUserAgent, qApp));
 #endif
     DependencyManager::set<StatTracker>();
-    DependencyManager::set<ScriptEngines>(ScriptEngine::CLIENT_SCRIPT);
+    DependencyManager::set<ScriptEngines>(ScriptEngine::CLIENT_SCRIPT, defaultScriptsOverrideOption);
     DependencyManager::set<ScriptInitializerMixin, NativeScriptInitializers>();
     DependencyManager::set<Preferences>();
     DependencyManager::set<recording::Deck>();
@@ -877,6 +887,7 @@ bool setupEssentials(int& argc, char** argv, bool runningMarkerExisted) {
     DependencyManager::set<AudioScope>();
     DependencyManager::set<DeferredLightingEffect>();
     DependencyManager::set<TextureCache>();
+    DependencyManager::set<MaterialCache>();
     DependencyManager::set<TextureCacheScriptingInterface>();
     DependencyManager::set<FramebufferCache>();
     DependencyManager::set<AnimationCache>();
@@ -1343,9 +1354,22 @@ Application::Application(int& argc, char** argv, QElapsedTimer& startupTimer, bo
     connect(this, &QCoreApplication::aboutToQuit, addressManager.data(), &AddressManager::storeCurrentAddress);
 
     connect(this, &Application::activeDisplayPluginChanged, this, &Application::updateThreadPoolCount);
-    connect(this, &Application::activeDisplayPluginChanged, this, [](){
+    connect(this, &Application::activeDisplayPluginChanged, this, [=](){
         qApp->setProperty(hifi::properties::HMD, qApp->isHMDMode());
         auto displayPlugin = qApp->getActiveDisplayPlugin();
+
+        if (displayPlugin->isHmd()) {
+            if (_preferredCursor.get() == Cursor::Manager::getIconName(Cursor::Icon::RETICLE)) {
+                setPreferredCursor(Cursor::Manager::getIconName(Cursor::Icon::RETICLE));
+            }
+            else {
+                setPreferredCursor(Cursor::Manager::getIconName(Cursor::Icon::ARROW));
+            }
+        }
+        else {
+            setPreferredCursor(Cursor::Manager::getIconName(Cursor::Icon::SYSTEM));
+        }
+
         setCrashAnnotation("display_plugin", displayPlugin->getName().toStdString());
         setCrashAnnotation("hmd", displayPlugin->isHmd() ? "1" : "0");
     });
@@ -1375,6 +1399,13 @@ Application::Application(int& argc, char** argv, QElapsedTimer& startupTimer, bo
     // Save avatar location immediately after a teleport.
     connect(myAvatar.get(), &MyAvatar::positionGoneTo,
         DependencyManager::get<AddressManager>().data(), &AddressManager::storeCurrentAddress);
+
+    connect(myAvatar.get(), &MyAvatar::positionGoneTo, this, [this] {
+        if (!_physicsEnabled) {
+            // when we arrive somewhere without physics enabled --> startSafeLanding
+            _octreeProcessor.startSafeLanding();
+        }
+    }, Qt::QueuedConnection);
 
     connect(myAvatar.get(), &MyAvatar::skeletonModelURLChanged, [](){
         QUrl avatarURL = qApp->getMyAvatar()->getSkeletonModelURL();
@@ -1442,6 +1473,9 @@ Application::Application(int& argc, char** argv, QElapsedTimer& startupTimer, bo
         _avatarOverrideUrl = QUrl::fromUserInput(replaceURL);
         _saveAvatarOverrideUrl = true;
     }
+
+    // setDefaultFormat has no effect after the platform window has been created, so call it here.
+    QSurfaceFormat::setDefaultFormat(getDefaultOpenGLSurfaceFormat());
 
     _glWidget = new GLCanvas();
     getApplicationCompositor().setRenderingWidget(_glWidget);
@@ -2845,6 +2879,7 @@ Application::~Application() {
     DependencyManager::destroy<AnimationCacheScriptingInterface>();
     DependencyManager::destroy<AnimationCache>();
     DependencyManager::destroy<FramebufferCache>();
+    DependencyManager::destroy<MaterialCache>();
     DependencyManager::destroy<TextureCacheScriptingInterface>();
     DependencyManager::destroy<TextureCache>();
     DependencyManager::destroy<ModelCacheScriptingInterface>();
@@ -2880,6 +2915,16 @@ Application::~Application() {
 
     // Can't log to file past this point, FileLogger about to be deleted
     qInstallMessageHandler(LogHandler::verboseMessageHandler);
+
+#ifdef Q_OS_MAC
+    // Clear the event queue before application is totally destructed.
+    // This will drain the messasge queue of pending "deleteLaters" queued up
+    // during shutdown of the script engines.
+    // We do this here because there is a possiblty that [NSApplication terminate:]
+    // will be called during processEvents which will invoke all static destructors.
+    // We want to postpone this utill the last possible moment.
+    QCoreApplication::processEvents();
+#endif
 }
 
 void Application::initializeGL() {
@@ -4128,6 +4173,13 @@ bool Application::event(QEvent* event) {
         case QEvent::FocusOut:
             focusOutEvent(static_cast<QFocusEvent*>(event));
             return true;
+        case QEvent::FocusIn:
+        { //testing to see if we can set focus when focus is not set to root window.
+            _glWidget->activateWindow();
+            _glWidget->setFocus();
+            return true; 
+        }
+
         case QEvent::TouchBegin:
             touchBeginEvent(static_cast<QTouchEvent*>(event));
             event->accept();
@@ -5089,7 +5141,7 @@ void Application::idle() {
     // If the offscreen Ui has something active that is NOT the root, then assume it has keyboard focus.
     if (offscreenUi && offscreenUi->getWindow()) {
         auto activeFocusItem = offscreenUi->getWindow()->activeFocusItem();
-        if (_keyboardDeviceHasFocus && activeFocusItem != offscreenUi->getRootItem()) {
+        if (_keyboardDeviceHasFocus && (activeFocusItem != NULL && activeFocusItem != offscreenUi->getRootItem())) {
             _keyboardMouseDevice->pluginFocusOutEvent();
             _keyboardDeviceHasFocus = false;
             synthesizeKeyReleasEvents();
@@ -5373,12 +5425,10 @@ void Application::loadSettings() {
     }
 
     bool isFirstPerson = false;
-    if (_firstRun.get()) {
-        // If this is our first run, and no preferred devices were set, default to
-        // an HMD device if available.
+    if (arguments().contains("--no-launcher")) {
         auto displayPlugins = pluginManager->getDisplayPlugins();
         for (auto& plugin : displayPlugins) {
-            if (plugin->isHmd()) {
+            if (!plugin->isHmd()) {
                 if (auto action = menu->getActionForOption(plugin->getName())) {
                     action->setChecked(true);
                     action->trigger();
@@ -5386,18 +5436,31 @@ void Application::loadSettings() {
                 }
             }
         }
-
         isFirstPerson = (qApp->isHMDMode());
-
     } else {
-        // if this is not the first run, the camera will be initialized differently depending on user settings
-
-        if (qApp->isHMDMode()) {
-            // if the HMD is active, use first-person camera, unless the appropriate setting is checked
-            isFirstPerson = menu->isOptionChecked(MenuOption::FirstPersonHMD);
+        if (_firstRun.get()) {
+            // If this is our first run, and no preferred devices were set, default to
+            // an HMD device if available.
+            auto displayPlugins = pluginManager->getDisplayPlugins();
+            for (auto& plugin : displayPlugins) {
+                if (plugin->isHmd()) {
+                    if (auto action = menu->getActionForOption(plugin->getName())) {
+                        action->setChecked(true);
+                        action->trigger();
+                        break;
+                    }
+                }
+            }
+            isFirstPerson = (qApp->isHMDMode());
         } else {
-            // if HMD is not active, only use first person if the menu option is checked
-            isFirstPerson = menu->isOptionChecked(MenuOption::FirstPerson);
+            // if this is not the first run, the camera will be initialized differently depending on user settings
+            if (qApp->isHMDMode()) {
+                // if the HMD is active, use first-person camera, unless the appropriate setting is checked
+                isFirstPerson = menu->isOptionChecked(MenuOption::FirstPersonHMD);
+            } else {
+                // if HMD is not active, only use first person if the menu option is checked
+                isFirstPerson = menu->isOptionChecked(MenuOption::FirstPerson);
+            }
         }
     }
 
@@ -5931,9 +5994,7 @@ void Application::resetPhysicsReadyInformation() {
     _gpuTextureMemSizeStabilityCount = 0;
     _gpuTextureMemSizeAtLastCheck = 0;
     _physicsEnabled = false;
-    _octreeProcessor.startSafeLanding();
 }
-
 
 void Application::reloadResourceCaches() {
     resetPhysicsReadyInformation();
@@ -5955,7 +6016,7 @@ void Application::reloadResourceCaches() {
     DependencyManager::get<ResourceCacheSharedItems>()->clear();
     DependencyManager::get<AnimationCache>()->refreshAll();
     DependencyManager::get<SoundCache>()->refreshAll();
-    MaterialCache::instance().refreshAll();
+    DependencyManager::get<MaterialCache>()->refreshAll();
     DependencyManager::get<ModelCache>()->refreshAll();
     ShaderCache::instance().refreshAll();
     DependencyManager::get<TextureCache>()->refreshAll();
@@ -6932,7 +6993,9 @@ void Application::queryOctree(NodeType_t serverType, PacketType packetType) {
         bool interstitialModeEnabled = DependencyManager::get<NodeList>()->getDomainHandler().getInterstitialModeEnabled();
 
         ConicalViewFrustum sphericalView;
-        sphericalView.setSimpleRadius(INITIAL_QUERY_RADIUS);
+        AABox box = getMyAvatar()->getGlobalBoundingBox();
+        float radius = glm::max(INITIAL_QUERY_RADIUS, 0.5f * glm::length(box.getDimensions()));
+        sphericalView.setPositionAndSimpleRadius(box.calcCenter(), radius);
 
         if (interstitialModeEnabled) {
             ConicalViewFrustum farView;
@@ -7139,7 +7202,7 @@ void Application::clearDomainOctreeDetails(bool clearAll) {
 
     DependencyManager::get<AnimationCache>()->clearUnusedResources();
     DependencyManager::get<SoundCache>()->clearUnusedResources();
-    MaterialCache::instance().clearUnusedResources();
+    DependencyManager::get<MaterialCache>()->clearUnusedResources();
     DependencyManager::get<ModelCache>()->clearUnusedResources();
     ShaderCache::instance().clearUnusedResources();
     DependencyManager::get<TextureCache>()->clearUnusedResources();
@@ -7844,7 +7907,7 @@ void Application::showAssetServerWidget(QString filePath) {
         if (!hmd->getShouldShowTablet() && !isHMDMode()) {
             getOffscreenUI()->show(url, "AssetServer", startUpload);
         } else {
-            static const QUrl url("hifi/dialogs/TabletAssetServer.qml");
+            static const QUrl url("qrc:///qml/hifi/dialogs/TabletAssetServer.qml");
             if (!tablet->isPathLoaded(url)) {
                 tablet->pushOntoStack(url);
             }
@@ -8736,6 +8799,8 @@ bool Application::isThrottleRendering() const {
 
 bool Application::hasFocus() const {
     bool result = (QApplication::activeWindow() != nullptr);
+
+    
 #if defined(Q_OS_WIN)
     // On Windows, QWidget::activateWindow() - as called in setFocus() - makes the application's taskbar icon flash but doesn't
     // take user focus away from their current window. So also check whether the application is the user's current foreground
