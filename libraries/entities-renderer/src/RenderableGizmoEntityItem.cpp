@@ -14,9 +14,7 @@
 using namespace render;
 using namespace render::entities;
 
-GizmoEntityRenderer::GizmoEntityRenderer(const EntityItemPointer& entity) : Parent(entity)
-{
-}
+GizmoEntityRenderer::GizmoEntityRenderer(const EntityItemPointer& entity) : Parent(entity) {}
 
 GizmoEntityRenderer::~GizmoEntityRenderer() {
     auto geometryCache = DependencyManager::get<GeometryCache>();
@@ -39,22 +37,6 @@ bool GizmoEntityRenderer::isTransparent() const {
         _ringProperties.getOuterEndAlpha() < 1.0f);
 
     return Parent::isTransparent() || ringTransparent;
-}
-
-bool GizmoEntityRenderer::needsRenderUpdateFromTypedEntity(const TypedEntityPointer& entity) const {
-    bool needsUpdate = resultWithReadLock<bool>([&] {
-        if (_gizmoType != entity->getGizmoType()) {
-            return true;
-        }
-
-        if (_ringProperties != entity->getRingProperties()) {
-            return true;
-        }
-
-        return false;
-    });
-
-    return needsUpdate;
 }
 
 void GizmoEntityRenderer::doRenderUpdateAsynchronousTyped(const TypedEntityPointer& entity) {
@@ -271,7 +253,7 @@ void GizmoEntityRenderer::doRender(RenderArgs* args) {
         });
 
         bool wireframe = render::ShapeKey(args->_globalShapeKey).isWireframe() || _primitiveMode == PrimitiveMode::LINES;
-        geometryCache->bindSimpleProgram(batch, false, isTransparent(), false, wireframe, true, true, forward);
+        geometryCache->bindSimpleProgram(batch, false, isTransparent(), wireframe, true, true, forward, graphics::MaterialKey::CULL_NONE);
 
         batch.setModelTransform(transform);
 

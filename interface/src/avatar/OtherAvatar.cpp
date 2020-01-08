@@ -75,6 +75,7 @@ void OtherAvatar::createOrb() {
         properties.setType(EntityTypes::Sphere);
         properties.setAlpha(1.0f);
         properties.setColor(getLoadingOrbColor(_loadingStatus));
+        properties.setName("Loading Avatar " + getID().toString());
         properties.setPrimitiveMode(PrimitiveMode::LINES);
         properties.getPulse().setMin(0.5f);
         properties.getPulse().setMax(1.0f);
@@ -201,6 +202,7 @@ void OtherAvatar::computeShapeLOD() {
         break;
     case workload::Region::UNKNOWN:
     case workload::Region::INVALID:
+    case workload::Region::R4:
     case workload::Region::R3:
     default:
         newLOD = BodyLOD::Sphere;
@@ -265,6 +267,7 @@ void OtherAvatar::simulate(float deltaTime, bool inView) {
                 _skeletonModel->getRig().computeExternalPoses(rootTransform);
                 _jointDataSimulationRate.increment();
 
+                head->simulate(deltaTime);
                 _skeletonModel->simulate(deltaTime, true);
 
                 locationChanged(); // joints changed, so if there are any children, update them.
@@ -275,9 +278,11 @@ void OtherAvatar::simulate(float deltaTime, bool inView) {
                     headPosition = getWorldPosition();
                 }
                 head->setPosition(headPosition);
+            } else {
+                head->simulate(deltaTime);
+                _skeletonModel->simulate(deltaTime, false);
             }
             head->setScale(getModelScale());
-            head->simulate(deltaTime);
             relayJointDataToChildren();
         } else {
             // a non-full update is still required so that the position, rotation, scale and bounds of the skeletonModel are updated.
@@ -510,13 +515,13 @@ void OtherAvatar::handleChangedAvatarEntityData() {
                 entity->setParentID(NULL_ID);
                 entity->setParentID(oldParentID);
 
-                if (entity->stillHasMyGrabAction()) {
+                if (entity->stillHasMyGrab()) {
                     // For this case: we want to ignore transform+velocities coming from authoritative OtherAvatar
                     // because the MyAvatar is grabbing and we expect the local grab state
                     // to have enough information to prevent simulation drift.
                     //
                     // Clever readers might realize this could cause problems.  For example,
-                    // if an ignored OtherAvagtar were to simultanously grab the object then there would be
+                    // if an ignored OtherAvatar were to simultanously grab the object then there would be
                     // a noticeable discrepancy between participants in the distributed physics simulation,
                     // however the difference would be stable and would not drift.
                     properties.clearTransformOrVelocityChanges();
@@ -556,9 +561,18 @@ void OtherAvatar::handleChangedAvatarEntityData() {
             _avatarEntitiesLock.withReadLock([&] {
                 packedAvatarEntityData = _packedAvatarEntityData;
             });
-            foreach (auto entityID, recentlyRemovedAvatarEntities) {
-                if (!packedAvatarEntityData.contains(entityID)) {
-                    entityTree->deleteEntity(entityID, true, true);
+            if (!recentlyRemovedAvatarEntities.empty()) {
+                std::vector<EntityItemID> idsToDelete;
+                idsToDelete.reserve(recentlyRemovedAvatarEntities.size());
+                foreach (auto entityID, recentlyRemovedAvatarEntities) {
+                    if (!packedAvatarEntityData.contains(entityID)) {
+                        idsToDelete.push_back(entityID);
+                    }
+                }
+                if (!idsToDelete.empty()) {
+                    bool force = true;
+                    bool ignoreWarnings = true;
+                    entityTree->deleteEntitiesByID(idsToDelete, force, ignoreWarnings);
                 }
             }
 

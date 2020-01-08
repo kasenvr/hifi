@@ -90,12 +90,13 @@ QmlWindowClass::QmlWindowClass(bool restricted) : _restricted(restricted) {
 }
 
 /**jsdoc
+ * Properties used to initialize an {@link OverlayWindow} or {@link OverlayWebWindow}.
  * @typedef {object} OverlayWindow.Properties
- * @property {string} title
- * @property {string} source
- * @property {number} width
- * @property {number} height
- * @property {boolean} visible
+ * @property {string} [title="WebWindow] - The window title.
+ * @property {string} [source] - The source of the QML or HTML to display.
+ * @property {number} [width=0] - The width of the window interior, in pixels.
+ * @property {number} [height=0] - The height of the window interior, in pixels.
+ * @property {boolean} [visible=true] - <code>true</codE> if the window should be visible, <code>false</code> if it shouldn't.
  */
 void QmlWindowClass::initQml(QVariantMap properties) {
 #ifndef DISABLE_QML
@@ -136,13 +137,9 @@ void QmlWindowClass::initQml(QVariantMap properties) {
 #if !defined(Q_OS_ANDROID)
         // If the restricted flag is on, override the FileTypeProfile and HFWebEngineProfile objects in the 
         // QML surface root context with local ones
-        qDebug() << "Context initialization lambda";
-        if (_restricted) {
-            qDebug() << "Restricting web content";
-            ContextAwareProfile::restrictContext(context);
-            FileTypeProfile::registerWithContext(context);
-            HFWebEngineProfile::registerWithContext(context);
-        }
+        ContextAwareProfile::restrictContext(context, _restricted);
+        FileTypeProfile::registerWithContext(context);
+        HFWebEngineProfile::registerWithContext(context);
 #endif
     };
 

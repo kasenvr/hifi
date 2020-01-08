@@ -23,6 +23,31 @@ var SECONDS_IN_MINUTE = 60;
 var ALWAYS_ON_MAX_LIFETIME_IN_SECONDS = 5 * SECONDS_IN_MINUTE;
 
 // *************************************
+// START STARTUP/SHUTDOWN
+// *************************************
+// #region STARTUP/SHUTDOWN
+
+
+// Connect the camera mode updated signal on startup
+function startup() {
+    Camera.modeUpdated.connect(handleCameraModeChanged);
+    cameraModeUpdatedSignalConnected = true;
+
+    Script.scriptEnding.connect(shutdown);
+}
+
+startup();
+
+function shutdown() {
+    maybeDisconnectCameraModeUpdatedSignal();    
+}
+
+
+// *************************************
+// END STARTUP/SHUTDOWN
+// *************************************
+
+// *************************************
 // START UTILTY
 // *************************************
 // #region UTILTY
@@ -59,6 +84,7 @@ var DISTANCE_SCALER_ALWAYS_ON = 0.45;
 var distanceScaler = DISTANCE_SCALER_ON;
 var userScaler = 1.0;
 var DEFAULT_LINE_HEIGHT = entityProps.lineHeight;
+var ADDITIONAL_PADDING = 1.06;
 function calculateInitialProperties(uuid) {
     var adjustedScaler = null;
     var distance = null;
@@ -82,7 +108,7 @@ function calculateInitialProperties(uuid) {
     distanceScaler = avatarNametagMode === "on" ? DISTANCE_SCALER_ON : DISTANCE_SCALER_ALWAYS_ON;
     adjustedScaler = distance * distanceScaler;
     // Get the new dimensions from the text helper
-    dimensions = [textHelper.getTotalTextLength(), DEFAULT_LINE_HEIGHT, Z_SIZE];
+    dimensions = [textHelper.getTotalTextLength() * ADDITIONAL_PADDING, DEFAULT_LINE_HEIGHT, Z_SIZE];
     // Adjust the dimensions by the modified distance scaler
     scaledDimensions = Vec3.multiply(dimensions, adjustedScaler);
 
@@ -196,6 +222,27 @@ function toggleInterval() {
 }
 
 
+// Disconnect the camera mode updated signal if we have one connected for the selfie mode
+var cameraModeUpdatedSignalConnected = false;
+function maybeDisconnectCameraModeUpdatedSignal() {
+    if (cameraModeUpdatedSignalConnected) {
+        Camera.modeUpdated.disconnect(handleCameraModeChanged);
+        cameraModeUpdatedSignalConnected = false;
+    }
+}
+
+
+// Turn on the nametag for yourself if you are in selfie mode, other wise delete it
+function handleCameraModeChanged(mode) {
+    if (mode === "selfie") {
+        if (avatarNametagMode === "alwaysOn") {
+            add(MyAvatar.sessionUUID);
+        }
+    } else {
+        maybeRemove(MyAvatar.sessionUUID);
+    }
+}
+
 // Handle checking to see if we should add or delete nametags in persistent mode
 var alwaysOnAvatarDistanceCheck = false;
 var DISTANCE_CHECK_INTERVAL_MS = 1000;
@@ -214,6 +261,10 @@ function handleAlwaysOnMode(shouldTurnOnAlwaysOnMode) {
             });
         maybeClearAlwaysOnAvatarDistanceCheck();
         alwaysOnAvatarDistanceCheck = Script.setInterval(maybeAddOrRemoveIntervalCheck, DISTANCE_CHECK_INTERVAL_MS);
+
+        if (Camera.mode === "selfie") {
+            add(MyAvatar.sessionUUID);
+        }
     }
 }
 
@@ -253,11 +304,7 @@ function getCorrectName(uuid) {
     var avatar = _this.avatars[uuid];
     var avatarInfo = avatar.avatarInfo;
 
-    var displayNameToUse = avatarInfo.sessionDisplayName.trim();
-    
-    if (displayNameToUse === "") {
-        displayNameToUse = avatarInfo.displayName.trim();
-    }
+    var displayNameToUse = avatarInfo.displayName.trim();
 
     if (displayNameToUse === "") {
         displayNameToUse = "anonymous";

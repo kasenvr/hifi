@@ -83,7 +83,7 @@ AvatarMixer::AvatarMixer(ReceivedMessage& message) :
     packetReceiver.registerListener(PacketType::BulkAvatarTraitsAck, this, "queueIncomingPacket");
     packetReceiver.registerListenerForTypes({ PacketType::OctreeStats, PacketType::EntityData, PacketType::EntityErase },
         this, "handleOctreePacket");
-    packetReceiver.registerListener(PacketType::ChallengeOwnership, this, "handleChallengeOwnership");
+    packetReceiver.registerListener(PacketType::ChallengeOwnership, this, "queueIncomingPacket");
 
     packetReceiver.registerListenerForTypes({
         PacketType::ReplicatedAvatarIdentity,
@@ -499,6 +499,8 @@ void AvatarMixer::handleAvatarKilled(SharedNodePointer avatarNode) {
            } else {
                _sessionDisplayNames.erase(displayNameIter);
            }
+
+            nodeData->getAvatar().stopChallengeTimer();
         }
 
         std::unique_ptr<NLPacket> killPacket;
@@ -510,10 +512,10 @@ void AvatarMixer::handleAvatarKilled(SharedNodePointer avatarNode) {
             // we relay avatar kill packets to agents that are not upstream
             // and downstream avatar mixers, if the node that was just killed was being replicatedConnectedAgent
             return node->getActiveSocket() &&
-                ((node->getType() == NodeType::Agent && !node->isUpstream()) ||
+                (((node->getType() == NodeType::Agent || node->getType() == NodeType::EntityScriptServer) && !node->isUpstream()) ||
                  (avatarNode->isReplicated() && shouldReplicateTo(*avatarNode, *node)));
         }, [&](const SharedNodePointer& node) {
-            if (node->getType() == NodeType::Agent) {
+            if (node->getType() == NodeType::Agent || node->getType() == NodeType::EntityScriptServer) {
                 if (!killPacket) {
                     killPacket = NLPacket::create(PacketType::KillAvatar, NUM_BYTES_RFC4122_UUID + sizeof(KillAvatarReason), true);
                     killPacket->write(avatarNode->getUUID().toRfc4122());
@@ -1079,6 +1081,12 @@ void AvatarMixer::setupEntityQuery() {
     priorityZoneQuery["avatarPriority"] = true;
     priorityZoneQuery["type"] = "Zone";
 
+    QJsonObject queryFlags;
+    queryFlags["includeAncestors"] = true;
+    queryFlags["includeDescendants"] = true;
+    priorityZoneQuery["flags"] = queryFlags;
+    priorityZoneQuery["name"] = true; // Handy for debugging.
+
     _entityViewer.getOctreeQuery().setJSONParameters(priorityZoneQuery);
     _slaveSharedData.entityTree = entityTree;
 }
@@ -1134,16 +1142,6 @@ void AvatarMixer::entityRemoved(EntityItem * entity) {
 
 void AvatarMixer::entityChange() {
     _dirtyHeroStatus = true;
-}
-
-void AvatarMixer::handleChallengeOwnership(QSharedPointer<ReceivedMessage> message, SharedNodePointer senderNode) {
-    if (senderNode->getType() == NodeType::Agent && senderNode->getLinkedData()) {
-        auto clientData = static_cast<AvatarMixerClientData*>(senderNode->getLinkedData());
-        auto avatar = clientData->getAvatarSharedPointer();
-        if (avatar) {
-            avatar->handleChallengeResponse(message.data());
-        }
-    }
 }
 
 void AvatarMixer::aboutToFinish() {

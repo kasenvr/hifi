@@ -10,7 +10,6 @@
 
 #include <QtCore/QObject>
 
-#include <RegisteredMetaTypes.h>
 #include <DependencyManager.h>
 #include <PhysicsEngine.h>
 #include <Pick.h>
@@ -29,7 +28,7 @@
  * @property {FilterFlags} PICK_AVATAR_ENTITIES - Include avatar entities when intersecting. <em>Read-only.</em>
  * @property {FilterFlags} PICK_LOCAL_ENTITIES - Include local entities when intersecting. <em>Read-only.</em>
  * @property {FilterFlags} PICK_AVATARS - Include avatars when intersecting. <em>Read-only.</em>
- * @property {FilterFlags} PICK_HUD - Include the HUD sphere when intersecting in HMD mode. <em>Read-only.</em>
+ * @property {FilterFlags} PICK_HUD - Include the HUD surface when intersecting in HMD mode. <em>Read-only.</em>
  *
  * @property {FilterFlags} PICK_ENTITIES - Include domain and avatar entities when intersecting. <em>Read-only.</em>
  *     <p class="important">Deprecated: This property is deprecated and will be removed. Use <code>PICK_DOMAIN_ENTITIES | 
@@ -53,6 +52,9 @@
  *     <em>Read-only.</em>
  *     <p><strong>Warning:</strong> Not yet implemented.</p>
  *
+ * @property {FilterFlags} PICK_BYPASS_IGNORE - Allows pick to intersect entities even when their ignorePickIntersection property is 'true'.
+ *     For debug purposes. <em>Read-only.</em>
+ *
  * @property {IntersectionType} INTERSECTED_NONE - Intersected nothing. <em>Read-only.</em>
  * @property {IntersectionType} INTERSECTED_ENTITY - Intersected an entity. <em>Read-only.</em>
  * @property {IntersectionType} INTERSECTED_LOCAL_ENTITY - Intersected a local entity. <em>Read-only.</em>
@@ -61,7 +63,7 @@
  *     <p class="important">Deprecated: This property is deprecated and will be removed. Use 
  *     <code>INTERSECTED_LOCAL_ENTITY</code> instead.</p>
  * @property {IntersectionType} INTERSECTED_AVATAR - Intersected an avatar. <em>Read-only.</em>
- * @property {IntersectionType} INTERSECTED_HUD - Intersected the HUD sphere. <em>Read-only.</em>
+ * @property {IntersectionType} INTERSECTED_HUD - Intersected the HUD surface. <em>Read-only.</em>
  *
  * @property {number} perFrameTimeBudget - The maximum time, in microseconds, to spend per frame updating pick results.
  */
@@ -88,6 +90,8 @@ class PickScriptingInterface : public QObject, public Dependency {
 
     Q_PROPERTY(unsigned int PICK_ALL_INTERSECTIONS READ PICK_ALL_INTERSECTIONS CONSTANT)
 
+    Q_PROPERTY(unsigned int PICK_BYPASS_IGNORE READ PICK_BYPASS_IGNORE CONSTANT)
+
     Q_PROPERTY(unsigned int INTERSECTED_NONE READ INTERSECTED_NONE CONSTANT)
     Q_PROPERTY(unsigned int INTERSECTED_ENTITY READ INTERSECTED_ENTITY CONSTANT)
     Q_PROPERTY(unsigned int INTERSECTED_LOCAL_ENTITY READ INTERSECTED_LOCAL_ENTITY CONSTANT)
@@ -98,11 +102,6 @@ class PickScriptingInterface : public QObject, public Dependency {
     SINGLETON_DEPENDENCY
 
 public:
-    unsigned int createRayPick(const QVariant& properties);
-    unsigned int createStylusPick(const QVariant& properties);
-    unsigned int createCollisionPick(const QVariant& properties);
-    unsigned int createParabolaPick(const QVariant& properties);
-
     void registerMetaTypes(QScriptEngine* engine);
 
     /**jsdoc
@@ -135,11 +134,46 @@ public:
     Q_INVOKABLE void disablePick(unsigned int uid);
 
     /**jsdoc
+     * Get the enabled status of a pick. Enabled picks update their pick results.
+     * @function Picks.isPickEnabled
+     * @param {number} id - The ID of the pick.
+     * @returns {boolean} enabled - Whether or not the pick is enabled.
+     */
+    Q_INVOKABLE bool isPickEnabled(unsigned int uid) const;
+
+    /**jsdoc
      * Removes (deletes) a pick.
      * @function Picks.removePick
      * @param {number} id - The ID of the pick.
      */
     Q_INVOKABLE void removePick(unsigned int uid);
+
+    /**jsdoc
+     * Gets the current properties of the pick.
+     * @function Picks.getPickProperties
+     * @param {number} id - The ID of the pick.
+     * @returns {Picks.RayPickProperties|Picks.ParabolaPickProperties|Picks.StylusPickProperties|Picks.CollisionPickProperties}
+     *     Properties of the pick, per the pick <code>type</code>.
+     */
+    Q_INVOKABLE QVariantMap getPickProperties(unsigned int uid) const;
+
+    /**jsdoc
+     * Gets the parameters that were passed in to {@link Picks.createPick} to create the pick, if the pick was created through 
+     * a script. Note that these properties do not reflect the current state of the pick.
+     * See {@link Picks.getPickProperties}.
+     * @function Picks.getPickScriptParameters
+     * @param {number} id - The ID of the pick.
+     * @returns {Picks.RayPickProperties|Picks.ParabolaPickProperties|Picks.StylusPickProperties|Picks.CollisionPickProperties} 
+     *     Script-provided properties, per the pick <code>type</code>.
+     */
+    Q_INVOKABLE QVariantMap getPickScriptParameters(unsigned int uid) const;
+
+    /**jsdoc
+     * Gets all picks which currently exist, including disabled picks.
+     * @function Picks.getPicks
+     * @returns {number[]} picks - The IDs of the picks.
+     */
+    Q_INVOKABLE QVector<unsigned int> getPicks() const;
 
     /**jsdoc
      * Gets the most recent result from a pick. A pick continues to be updated ready to return a result, as long as it is 
@@ -254,12 +288,14 @@ public:
     unsigned int getPerFrameTimeBudget() const;
     void setPerFrameTimeBudget(unsigned int numUsecs);
 
+    static constexpr unsigned int PICK_BYPASS_IGNORE() { return PickFilter::getBitMask(PickFilter::FlagBit::PICK_BYPASS_IGNORE); }
+
 public slots:
 
     /**jsdoc
      * @function Picks.PICK_ENTITIES
      * @deprecated This function is deprecated and will be removed. Use the <code>Picks.PICK_DOMAIN_ENTITIES | 
-     *     Picks.PICK_AVATAR_ENTITIES</cpode> properties expression instead.
+     *     Picks.PICK_AVATAR_ENTITIES</code> properties expression instead.
      * @returns {number}
      */
     static constexpr unsigned int PICK_ENTITIES() { return PickFilter::getBitMask(PickFilter::FlagBit::DOMAIN_ENTITIES) | PickFilter::getBitMask(PickFilter::FlagBit::AVATAR_ENTITIES); }
@@ -419,6 +455,11 @@ public slots:
     static constexpr unsigned int INTERSECTED_HUD() { return IntersectionType::HUD; }
 
 protected:
+    static std::shared_ptr<PickQuery> buildRayPick(const QVariantMap& properties);
+    static std::shared_ptr<PickQuery> buildStylusPick(const QVariantMap& properties);
+    static std::shared_ptr<PickQuery> buildCollisionPick(const QVariantMap& properties);
+    static std::shared_ptr<PickQuery> buildParabolaPick(const QVariantMap& properties);
+
     static void setParentTransform(std::shared_ptr<PickQuery> pick, const QVariantMap& propMap);
 };
 

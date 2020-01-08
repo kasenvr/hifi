@@ -30,34 +30,18 @@ Q_DECLARE_METATYPE(QByteArray*)
 
 XMLHttpRequestClass::XMLHttpRequestClass(QScriptEngine* engine) :
     _engine(engine),
-    _async(true),
-    _url(),
-    _method(""),
-    _responseType(""),
-    _request(),
-    _reply(NULL),
-    _sendData(NULL),
-    _rawResponseData(),
-    _responseData(""),
-    _onTimeout(QScriptValue::NullValue),
-    _onReadyStateChange(QScriptValue::NullValue),
-    _readyState(XMLHttpRequestClass::UNSENT),
-    _errorCode(QNetworkReply::NoError),
-    _timeout(0),
-    _timer(this),
-    _numRedirects(0) {
+    _timer(this) {
 
     _request.setAttribute(QNetworkRequest::FollowRedirectsAttribute, true);
     _timer.setSingleShot(true);
 }
 
 XMLHttpRequestClass::~XMLHttpRequestClass() {
-    if (_reply) { delete _reply; }
-    if (_sendData) { delete _sendData; }
+    if (_reply) { _reply->deleteLater(); }
 }
 
 QScriptValue XMLHttpRequestClass::constructor(QScriptContext* context, QScriptEngine* engine) {
-    return engine->newQObject(new XMLHttpRequestClass(engine));
+    return engine->newQObject(new XMLHttpRequestClass(engine), QScriptEngine::ScriptOwnership);
 }
 
 QScriptValue XMLHttpRequestClass::getStatus() const {
@@ -126,6 +110,10 @@ QScriptValue XMLHttpRequestClass::getResponseHeader(const QString& name) const {
     return QScriptValue::NullValue;
 }
 
+/**jsdoc
+ * Called when the request's ready state changes.
+ * @callback XMLHttpRequest~onReadyStateChangeCallback
+ */
 void XMLHttpRequestClass::setReadyState(ReadyState readyState) {
     if (readyState != _readyState) {
         _readyState = readyState;
@@ -169,13 +157,12 @@ void XMLHttpRequestClass::send() {
 
 void XMLHttpRequestClass::send(const QScriptValue& data) {
     if (_readyState == OPENED && !_reply) {
+
         if (!data.isNull()) {
-            _sendData = new QBuffer(this);
             if (data.isObject()) {
-                QByteArray ba = qscriptvalue_cast<QByteArray>(data);
-                _sendData->setData(ba);
+                _sendData = qscriptvalue_cast<QByteArray>(data);
             } else {
-                _sendData->setData(data.toString().toUtf8());
+                _sendData = data.toString().toUtf8();
             }
         }
 
@@ -200,6 +187,10 @@ void XMLHttpRequestClass::doSend() {
     }
 }
 
+/**jsdoc
+ * Called when the request times out.
+ * @callback XMLHttpRequest~onTimeoutCallback 
+ */
 void XMLHttpRequestClass::requestTimeout() {
     if (_onTimeout.isFunction()) {
         _onTimeout.call(QScriptValue::NullValue);
@@ -237,6 +228,10 @@ void XMLHttpRequestClass::requestFinished() {
 
     setReadyState(DONE);
     emit requestComplete();
+
+    disconnectFromReply(_reply);
+    _reply->deleteLater();
+    _reply = nullptr;
 }
 
 void XMLHttpRequestClass::abortRequest() {
@@ -246,7 +241,7 @@ void XMLHttpRequestClass::abortRequest() {
         disconnectFromReply(_reply);
         _reply->abort();
         _reply->deleteLater();
-        _reply = NULL;
+        _reply = nullptr;
     }
 }
 

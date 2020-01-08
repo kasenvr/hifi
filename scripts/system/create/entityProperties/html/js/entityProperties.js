@@ -306,6 +306,26 @@ const GROUPS = [
                 showPropertyRule: { "keyLightMode": "enabled" },
             },
             {
+                label: "Shadow Bias",
+                type: "number-draggable",
+                min: 0,
+                max: 1,
+                step: 0.01,
+                decimals: 2,
+                propertyID: "keyLight.shadowBias",
+                showPropertyRule: { "keyLightMode": "enabled" },
+            },
+            {
+                label: "Shadow Max Distance",
+                type: "number-draggable",
+                min: 0,
+                max: 250,
+                step: 0.1,
+                decimals: 2,
+                propertyID: "keyLight.shadowMaxDistance",
+                showPropertyRule: { "keyLightMode": "enabled" },
+            },
+            {
                 label: "Skybox",
                 type: "dropdown",
                 options: { inherit: "Inherit", disabled: "Off", enabled: "On" },
@@ -378,8 +398,8 @@ const GROUPS = [
             {
                 label: "Base",
                 type: "number-draggable",
-                min: -1000,
-                max: 1000,
+                min: -16000,
+                max: 16000,
                 step: 1,
                 decimals: 0,
                 unit: "m",
@@ -389,8 +409,8 @@ const GROUPS = [
             {
                 label: "Ceiling",
                 type: "number-draggable",
-                min: -1000,
-                max: 5000,
+                min: -16000,
+                max: 16000,
                 step: 1,
                 decimals: 0,
                 unit: "m",
@@ -477,6 +497,12 @@ const GROUPS = [
                 options: { inherit: "Inherit", crowd: "Crowd", hero: "Hero" },
                 propertyID: "avatarPriority",
             },
+            {
+                label: "Screen-share",
+                type: "dropdown",
+                options: { inherit: "Inherit", disabled: "Off", enabled: "On" },
+                propertyID: "screenshare",
+            }
 
         ]
     },
@@ -1524,16 +1550,6 @@ const GROUPS = [
                 decimals: 4,
                 unit: "m/s<sup>2</sup>",
                 propertyID: "gravity",
-            },
-            {
-                label: "Acceleration",
-                type: "vec3",
-                vec3Type: "xyz",
-                subLabels: [ "x", "y", "z" ],
-                step: 0.1,
-                decimals: 4,
-                unit: "m/s<sup>2</sup>",
-                propertyID: "acceleration",
             },
         ]
     },

@@ -17,14 +17,12 @@ WIPE_PATHS = []
 
 if sys.platform == "win32":
     WIPE_PATHS = [
-        'jsdoc',
-        'resources/serverless'
+        'jsdoc'
     ]
 elif sys.platform == "darwin":
     INTERFACE_BUILD_PATH = os.path.join(INTERFACE_BUILD_PATH, "Interface.app", "Contents", "Resources")
     WIPE_PATHS = [
-        'jsdoc',
-        'serverless'
+        'jsdoc'
     ]
 
 
@@ -33,14 +31,14 @@ elif sys.platform == "darwin":
 def computeArchiveName(prefix):
     RELEASE_TYPE = os.getenv("RELEASE_TYPE", "DEV")
     RELEASE_NUMBER = os.getenv("RELEASE_NUMBER", "")
-    GIT_PR_COMMIT_SHORT = os.getenv("SHA7", "")
-    if GIT_PR_COMMIT_SHORT == '':
-        GIT_PR_COMMIT_SHORT = os.getenv("GIT_PR_COMMIT_SHORT", "")
+    GIT_COMMIT_SHORT = os.getenv("SHA7", "")
+    if GIT_COMMIT_SHORT == '':
+        GIT_COMMIT_SHORT = os.getenv("GIT_COMMIT_SHORT", "")
 
     if RELEASE_TYPE == "PRODUCTION":
-        BUILD_VERSION = "{}-{}".format(RELEASE_NUMBER, GIT_PR_COMMIT_SHORT)
+        BUILD_VERSION = "{}-{}".format(RELEASE_NUMBER, GIT_COMMIT_SHORT)
     elif RELEASE_TYPE == "PR":
-        BUILD_VERSION = "PR{}-{}".format(RELEASE_NUMBER, GIT_PR_COMMIT_SHORT)
+        BUILD_VERSION = "PR{}-{}".format(RELEASE_NUMBER, GIT_COMMIT_SHORT)
     else:
         BUILD_VERSION = "dev"
 
@@ -80,9 +78,6 @@ def fixupMacZip(filename):
                     continue
                 # ignore the nitpick app
                 if newFilename.startswith('nitpick.app'):
-                    continue
-                # ignore the serverless content
-                if newFilename.startswith('interface.app/Contents/Resources/serverless'):
                     continue
                 # if we made it here, include the file in the output
                 buffer = inzip.read(entry.filename)
@@ -148,9 +143,30 @@ def signBuild(executablePath):
         ])
 
 
+def zipDarwinLauncher():
+    launcherSourcePath = os.path.join(SOURCE_PATH, 'launchers', 'qt')
+    launcherBuildPath = os.path.join(BUILD_PATH, 'launcher')
+
+    archiveName = computeArchiveName('HQ Launcher')
+
+    cpackCommand = [
+        'cpack',
+        '-G', 'ZIP',
+        '-D', "CPACK_PACKAGE_FILE_NAME={}".format(archiveName),
+        '-D', "CPACK_INCLUDE_TOPLEVEL_DIRECTORY=OFF"
+    ]
+    print("Create ZIP version of installer archive")
+    print(cpackCommand)
+    hifi_utils.executeSubprocess(cpackCommand, folder=launcherBuildPath)
+    launcherZipDestFile = os.path.join(BUILD_PATH, "{}.zip".format(archiveName))
+    launcherZipSourceFile = os.path.join(launcherBuildPath, "{}.zip".format(archiveName))
+    print("Moving {} to {}".format(launcherZipSourceFile, launcherZipDestFile))
+    shutil.move(launcherZipSourceFile, launcherZipDestFile)
+
+
 def buildLightLauncher():
-    launcherSourcePath = os.path.join(SOURCE_PATH, 'launchers', sys.platform)
-    launcherBuildPath = os.path.join(BUILD_PATH, 'launcher') 
+    launcherSourcePath = os.path.join(SOURCE_PATH, 'launchers', 'qt')
+    launcherBuildPath = os.path.join(BUILD_PATH, 'launcher')
     if not os.path.exists(launcherBuildPath):
         os.makedirs(launcherBuildPath)
     # configure launcher build
@@ -169,12 +185,13 @@ def buildLightLauncher():
     if sys.platform == 'win32':
         buildTarget = 'ALL_BUILD'
     hifi_utils.executeSubprocess([
-            'cmake', 
+            'cmake',
             '--build', launcherBuildPath,
-            '--config', 'Release', 
+            '--config', 'Release',
             '--target', buildTarget
         ], folder=launcherBuildPath)
     if sys.platform == 'darwin':
+        zipDarwinLauncher()
         launcherDestFile = os.path.join(BUILD_PATH, "{}.dmg".format(computeArchiveName('Launcher')))
         launcherSourceFile = os.path.join(launcherBuildPath, "HQ Launcher.dmg")
     elif sys.platform == 'win32':

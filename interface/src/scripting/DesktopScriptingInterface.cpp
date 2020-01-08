@@ -31,10 +31,10 @@
  * @property {InteractiveWindow.DockArea} RIGHT - Dock to the right edge of the Interface window.
  */
 /**jsdoc
- * A docking location of an <code>InteractiveWindow</code>.
+ * <p>A docking location of an <code>InteractiveWindow</code>.</p>
  * <table>
  *   <thead>
- *     <tr><th>Value</th><th>Name</p><th>Description</th>
+ *     <tr><th>Value</th><th>Name</th><th>Description</th></tr>
  *   </thead>
  *   <tbody>
  *     <tr><td><code>0</code></td><td>TOP</td><td>Dock to the top edge of the Interface window.</td></tr>
@@ -51,6 +51,26 @@ static const QVariantMap DOCK_AREA {
     { "LEFT", DockArea::LEFT },
     { "RIGHT", DockArea::RIGHT }
 };
+
+/**jsdoc
+ * The possible "relative position anchors" of an <code>InteractiveWindow</code>. Used when defining the `relativePosition` property of an `InteractiveWindow`.
+ * @typedef {object} InteractiveWindow.RelativePositionAnchors
+ * @property {InteractiveWindow.RelativePositionAnchor} NO_ANCHOR - Specifies that the position of the `InteractiveWindow` will not be relative to any part of the Interface window.
+ * @property {InteractiveWindow.RelativePositionAnchor} TOP_LEFT - Specifies that the `relativePosition` of the `InteractiveWindow` will be offset from the top left of the Interface window.
+ * @property {InteractiveWindow.RelativePositionAnchor} TOP_RIGHT - Specifies that the `relativePosition` of the `InteractiveWindow` will be offset from the top right of the Interface window.
+ * @property {InteractiveWindow.RelativePositionAnchor} BOTTOM_RIGHT - Specifies that the `relativePosition` of the `InteractiveWindow` will be offset from the bottom right of the Interface window.
+ * @property {InteractiveWindow.RelativePositionAnchor} BOTTOM_LEFT - Specifies that the `relativePosition` of the `InteractiveWindow` will be offset from the bottom left of the Interface window.
+ */
+static const QVariantMap RELATIVE_POSITION_ANCHOR {
+    { "NO_ANCHOR", RelativePositionAnchor::NO_ANCHOR },
+    { "TOP_LEFT", RelativePositionAnchor::TOP_LEFT },
+    { "TOP_RIGHT", RelativePositionAnchor::TOP_RIGHT },
+    { "BOTTOM_RIGHT", RelativePositionAnchor::BOTTOM_RIGHT },
+    { "BOTTOM_LEFT", RelativePositionAnchor::BOTTOM_LEFT }
+};
+
+DesktopScriptingInterface::DesktopScriptingInterface(QObject* parent, bool restricted) 
+    : QObject(parent), _restricted(restricted) { }
 
 int DesktopScriptingInterface::getWidth() {
     QSize size = qApp->getWindow()->windowHandle()->screen()->virtualSize();
@@ -70,10 +90,10 @@ int DesktopScriptingInterface::getHeight() {
  *     own separate window.
  */
 /**jsdoc
- * A display mode for an <code>InteractiveWindow</code>.
+ * <p>A display mode for an <code>InteractiveWindow</code>.</p>
  * <table>
  *   <thead>
- *     <tr><th>Value</th><th>Name</p><th>Description</th>
+ *     <tr><th>Value</th><th>Name</th><th>Description</th></tr>
  *   </thead>
  *   <tbody>
  *     <tr><td><code>0</code></td><td>VIRTUAL</td><td>The window is displayed inside Interface: in the desktop window in 
@@ -96,6 +116,10 @@ QVariantMap DesktopScriptingInterface::getDockArea() {
     return DOCK_AREA;
 }
 
+QVariantMap DesktopScriptingInterface::getRelativePositionAnchor() {
+    return RELATIVE_POSITION_ANCHOR;
+}
+
 void DesktopScriptingInterface::setHUDAlpha(float alpha) {
     qApp->getApplicationCompositor().setAlpha(alpha);
 }
@@ -111,10 +135,11 @@ void DesktopScriptingInterface::show(const QString& path, const QString&  title)
 InteractiveWindowPointer DesktopScriptingInterface::createWindow(const QString& sourceUrl, const QVariantMap& properties) {
     if (QThread::currentThread() != thread()) {
         InteractiveWindowPointer interactiveWindow = nullptr;
-        BLOCKING_INVOKE_METHOD(this, "createWindow",
+        BLOCKING_INVOKE_METHOD(this, "createWindowOnThread",
             Q_RETURN_ARG(InteractiveWindowPointer, interactiveWindow),
             Q_ARG(QString, sourceUrl),
-            Q_ARG(QVariantMap, properties));
+            Q_ARG(QVariantMap, properties),
+            Q_ARG(QThread*, QThread::currentThread()));
         return interactiveWindow;
     }
 
@@ -127,5 +152,18 @@ InteractiveWindowPointer DesktopScriptingInterface::createWindow(const QString& 
         return nullptr;
     }
 
-    return new InteractiveWindow(sourceUrl, properties);
+    return new InteractiveWindow(sourceUrl, properties, _restricted);
+}
+
+InteractiveWindowPointer DesktopScriptingInterface::createWindowOnThread(const QString& sourceUrl, const QVariantMap& properties, QThread* targetThread) {
+    // The offscreen surface already validates against non-local QML sources, but we also need to ensure that 
+    // if we create top level QML, like dock widgets or other types of QQuickView containing desktop windows 
+    // that the source URL is permitted
+    const auto& urlValidator = OffscreenQmlSurface::getUrlValidator();
+    if (!urlValidator(sourceUrl)) {
+        return nullptr;
+    }
+    InteractiveWindowPointer window = new InteractiveWindow(sourceUrl, properties, _restricted);
+    window->moveToThread(targetThread);
+    return window;
 }

@@ -78,7 +78,7 @@ public:
     bool accurate { true };
     QUuid entityID;
     float distance { 0.0f };
-    BoxFace face;
+    BoxFace face { UNKNOWN_FACE };
     glm::vec3 intersection;
     glm::vec3 surfaceNormal;
     QVariantMap extraInfo;
@@ -94,7 +94,7 @@ public:
     QUuid entityID;
     float distance { 0.0f };
     float parabolicDistance { 0.0f };
-    BoxFace face;
+    BoxFace face { UNKNOWN_FACE };
     glm::vec3 intersection;
     glm::vec3 surfaceNormal;
     QVariantMap extraInfo;
@@ -106,8 +106,9 @@ public:
  * "domain" entities, travel to different domains with a user as "avatar" entities, or be visible only to an individual user as 
  * "local" entities (a.k.a. "overlays").
  *
- * <p>Note: For Interface scripts, the entities available to scripts are those that Interface has displayed and so knows 
- * about.</p>
+ * <p>Note: For Interface, avatar, and client entity scripts, the entities available to scripts are those that Interface has 
+ * displayed and so knows about. For assignment client scripts, the entities available are those that are "seen" by the 
+ * {@link EntityViewer}. For entity server scripts, all entities are available.</p>
  *
  * <h3>Entity Methods</h3>
  *
@@ -446,7 +447,15 @@ public slots:
     /**jsdoc
      * Gets an entity's script object. In particular, this is useful for accessing a {@link Entities.EntityProperties-Web|Web} 
      * entity's HTML <code>EventBridge</code> script object to exchange messages with the web page script.
-     * <p>Alternatively, you can use {@link Entities.emitScriptEvent} and {@link Entities.webEventReceived} to exchange 
+     * <p>To send a message from an Interface script to a Web entity over its event bridge:</p>
+     * <pre class="prettyprint"><code>var entityObject = Entities.getEntityObject(entityID);
+     * entityObject.emitScriptEvent(message);</code></pre>
+     * <p>To receive a message from a Web entity over its event bridge in an Interface script:</p>
+     * <pre class="prettyprint"><code>var entityObject = Entities.getentityObject(entityID);
+     * entityObject.webEventReceived.connect(function(message) {
+     *     ...
+     * };</code></pre>
+     * <p>Alternatively, you can use {@link Entities.emitScriptEvent} and {@link Entities.webEventReceived} to exchange
      * messages with a Web entity over its event bridge.</p>
      * @function Entities.getEntityObject
      * @param {Uuid} id - The ID of the entity to get the script object for.
@@ -459,7 +468,7 @@ public slots:
      *     <title>HELLO</title>
      * </head>
      * <body>
-     *     <h1>HELLO</h1></h1>
+     *     <h1>HELLO</h1>
      *     <script>
      *         function onScriptEventReceived(message) {
      *             // Message received from the script.
@@ -476,7 +485,7 @@ public slots:
      * </body>
      * </html>
      * 
-     * // Script file.
+     * // Interface script file.
      * var webEntity = Entities.addEntity({
      *     type: "Web",
      *     position: Vec3.sum(MyAvatar.position, Vec3.multiplyQbyV(MyAvatar.orientation, { x: 0, y: 0.5, z: -3 })),
@@ -525,9 +534,12 @@ public slots:
     Q_INVOKABLE bool isAddedEntity(const QUuid& id);
 
     /**jsdoc
-     * Calculates the size of some text in a text entity.
+     * Calculates the size of some text in a {@link Entities.EntityProperties-Text|Text} entity. The entity need not be set 
+     * visible.
+     * <p><strong>Note:</strong> The size of text in a Text entity cannot be calculated immediately after the
+     * entity is created; a short delay is required while the entity finishes being created.</p>
      * @function Entities.textSize
-     * @param {Uuid} id - The ID of the entity to use for calculation.
+     * @param {Uuid} id - The ID of the Text entity to use for calculation.
      * @param {string} text - The string to calculate the size of.
      * @returns {Size} The size of the <code>text</code> in meters if the object is a text entity, otherwise
      *     <code>{ height: 0, width : 0 }</code>.
@@ -717,7 +729,8 @@ public slots:
      * Finds all domain and avatar entities whose axis-aligned boxes intersect a search frustum.
      * @function Entities.findEntitiesInFrustum
      * @param {ViewFrustum} frustum - The frustum to search in. The <code>position</code>, <code>orientation</code>, 
-     *     <code>projection</code>, and <code>centerRadius</code> properties must be specified.
+     *     <code>projection</code>, and <code>centerRadius</code> properties must be specified. The <code>fieldOfView</code> 
+     *     and <code>aspectRatio</code> properties are not used; these values are specified by the <code>projection</code>.
      * @returns {Uuid[]} An array of entity IDs whose axis-aligned boxes intersect the search frustum. The array is empty if no 
      *     entities could be found.
      * @example <caption>Report the number of entities in view.</caption>
@@ -1283,7 +1296,7 @@ public slots:
     Q_INVOKABLE int getJointParent(const QUuid& entityID, int index);
     
     /**jsdoc
-     * Gets the translation of a joint in a {@link Entities.EntityProperties-Model|Model} entity relative to the entity's 
+     * Gets the rotation of a joint in a {@link Entities.EntityProperties-Model|Model} entity relative to the entity's 
      * position and orientation.
      * @function Entities.getAbsoluteJointRotationInObjectFrame
      * @param {Uuid} entityID - The ID of the entity.
@@ -1794,7 +1807,7 @@ public slots:
      *     <title>HELLO</title>
      * </head>
      * <body>
-     *     <h1>HELLO</h1></h1>
+     *     <h1>HELLO</h1>
      *     <script>
      *         function onScriptEventReceived(message) {
      *             // Message received from the script.
@@ -1859,7 +1872,7 @@ public slots:
      /**jsdoc
       * Called when a {@link Entities.getMeshes} call is complete.
       * @callback Entities~getMeshesCallback
-      * @param {MeshProxy[]} meshes - If <code>success<</code> is <code>true</code>, a {@link MeshProxy} per mesh in the 
+      * @param {MeshProxy[]} meshes - If <code>success</code> is <code>true</code>, a {@link MeshProxy} per mesh in the 
       *     <code>Model</code> or <code>PolyVox</code> entity; otherwise <code>undefined</code>. 
       * @param {boolean} success - <code>true</code> if the {@link Entities.getMeshes} call was successful, <code>false</code> 
       *     otherwise. The call may be unsuccessful if the requested entity could not be found.

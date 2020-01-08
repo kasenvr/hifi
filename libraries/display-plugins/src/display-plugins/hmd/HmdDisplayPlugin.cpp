@@ -1,4 +1,4 @@
-//
+﻿//
 //  Created by Bradley Austin Davis on 2016/02/15
 //  Copyright 2016 High Fidelity, Inc.
 //
@@ -68,6 +68,16 @@ glm::mat4 HmdDisplayPlugin::getCullingProjection(const glm::mat4& baseProjection
     return _cullingProjection; 
 }
 
+glm::ivec4 HmdDisplayPlugin::eyeViewport(Eye eye) const {
+    uvec2 vpSize = getRecommendedRenderSize();
+    vpSize.x /= 2;
+    uvec2 vpPos;
+    if (eye == Eye::Right) {
+        vpPos.x = vpSize.x;
+    }
+    return ivec4(vpPos, vpSize);
+}
+
 #define DISABLE_PREVIEW_MENU_ITEM_DELAY_MS 500
 
 bool HmdDisplayPlugin::internalActivate() {
@@ -113,6 +123,11 @@ void HmdDisplayPlugin::internalDeactivate() {
 }
 
 void HmdDisplayPlugin::customizeContext() {
+
+    VisionSqueezeParameters parameters;
+    _visionSqueezeParametersBuffer =
+        gpu::BufferView(std::make_shared<gpu::Buffer>(sizeof(VisionSqueezeParameters), (const gpu::Byte*) &parameters));
+
     Parent::customizeContext();
     _hudRenderer.build();
 }
@@ -275,7 +290,7 @@ void HmdDisplayPlugin::internalPresent() {
             _previewTexture->setSource("HMD Preview Texture");
             _previewTexture->setUsage(gpu::Texture::Usage::Builder().withColor().build());
             _previewTexture->setStoredMipFormat(gpu::Element(gpu::VEC4, gpu::NUINT8, gpu::RGBA));
-            _previewTexture->assignStoredMip(0, image.byteCount(), image.constBits());
+            _previewTexture->assignStoredMip(0, image.sizeInBytes(), image.constBits());
             _previewTexture->setAutoGenerateMips(true);
 
         auto viewport = getViewportForSourceSize(uvec2(_previewTexture->getDimensions()));
@@ -477,4 +492,49 @@ HmdDisplayPlugin::~HmdDisplayPlugin() {
 
 float HmdDisplayPlugin::stutterRate() const {
     return _stutterRate.rate();
+}
+
+float adjustVisionSqueezeRatioForDevice(float visionSqueezeRatio, float visionSqueezeDeviceLow, float visionSqueezeDeviceHigh) {
+    if (visionSqueezeRatio <= 0.0f) {
+        return 0.0f;
+    }
+
+    float deviceRange = visionSqueezeDeviceHigh - visionSqueezeDeviceLow;
+    const float SQUEEZE_ADJUSTMENT = 0.75f; // magic number picked through experimentation
+    return deviceRange * (SQUEEZE_ADJUSTMENT * visionSqueezeRatio) + visionSqueezeDeviceLow;
+}
+
+void HmdDisplayPlugin::updateVisionSqueezeParameters(float visionSqueezeX, float visionSqueezeY,
+                                                     float visionSqueezeTransition,
+                                                     int visionSqueezePerEye, float visionSqueezeGroundPlaneY,
+                                                     float visionSqueezeSpotlightSize) {
+
+    visionSqueezeX = adjustVisionSqueezeRatioForDevice(visionSqueezeX, _visionSqueezeDeviceLowX, _visionSqueezeDeviceHighX);
+    visionSqueezeY = adjustVisionSqueezeRatioForDevice(visionSqueezeY, _visionSqueezeDeviceLowY, _visionSqueezeDeviceHighY);
+
+    auto& params = _visionSqueezeParametersBuffer.get<VisionSqueezeParameters>();
+    if (params._visionSqueezeX != visionSqueezeX) {
+        _visionSqueezeParametersBuffer.edit<VisionSqueezeParameters>()._visionSqueezeX = visionSqueezeX;
+    }
+    if (params._visionSqueezeY != visionSqueezeY) {
+        _visionSqueezeParametersBuffer.edit<VisionSqueezeParameters>()._visionSqueezeY = visionSqueezeY;
+    }
+    if (params._visionSqueezeTransition != visionSqueezeTransition) {
+        _visionSqueezeParametersBuffer.edit<VisionSqueezeParameters>()._visionSqueezeTransition = visionSqueezeTransition;
+    }
+    if (params._visionSqueezePerEye != visionSqueezePerEye) {
+        _visionSqueezeParametersBuffer.edit<VisionSqueezeParameters>()._visionSqueezePerEye = visionSqueezePerEye;
+    }
+    if (params._visionSqueezeGroundPlaneY != visionSqueezeGroundPlaneY) {
+        _visionSqueezeParametersBuffer.edit<VisionSqueezeParameters>()._visionSqueezeGroundPlaneY = visionSqueezeGroundPlaneY;
+    }
+    if (params._visionSqueezeSpotlightSize != visionSqueezeSpotlightSize) {
+        _visionSqueezeParametersBuffer.edit<VisionSqueezeParameters>()._visionSqueezeSpotlightSize = visionSqueezeSpotlightSize;
+    }
+}
+
+void HmdDisplayPlugin::setupCompositeScenePipeline(gpu::Batch& batch) {
+    batch.setPipeline(_drawTextureSqueezePipeline);
+    _visionSqueezeParametersBuffer.edit<VisionSqueezeParameters>()._hmdSensorMatrix = _currentPresentFrameInfo.presentPose;
+    batch.setUniformBuffer(drawTextureWithVisionSqueezeParamsSlot, _visionSqueezeParametersBuffer);
 }

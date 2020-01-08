@@ -11,7 +11,6 @@
 
 #include <AudioClient.h>
 #include <SettingHandle.h>
-#include <trackers/FaceTracker.h>
 #include <UsersScriptingInterface.h>
 
 #include "Application.h"
@@ -32,6 +31,7 @@ AvatarInputs* AvatarInputs::getInstance() {
 
 AvatarInputs::AvatarInputs(QObject* parent) : QObject(parent) {
     _showAudioTools = showAudioToolsSetting.get();
+    _showBubbleTools = showBubbleToolsSetting.get();
     auto nodeList = DependencyManager::get<NodeList>();
     auto usersScriptingInterface = DependencyManager::get<UsersScriptingInterface>();
     connect(nodeList.data(), &NodeList::ignoreRadiusEnabledChanged, this, &AvatarInputs::ignoreRadiusEnabledChanged);
@@ -75,8 +75,6 @@ void AvatarInputs::update() {
         return;
     }
 
-    AI_UPDATE(cameraEnabled, !Menu::getInstance()->isOptionChecked(MenuOption::NoFaceTracking));
-    AI_UPDATE(cameraMuted, Menu::getInstance()->isOptionChecked(MenuOption::MuteFaceTracking));
     AI_UPDATE(isHMD, qApp->isHMDMode());
 }
 
@@ -94,19 +92,12 @@ void AvatarInputs::setShowBubbleTools(bool showBubbleTools) {
         return;
 
     _showBubbleTools = showBubbleTools;
-    showBubbleToolsSetting.set(_showAudioTools);
+    showBubbleToolsSetting.set(_showBubbleTools);
     emit showBubbleToolsChanged(_showBubbleTools);
 }
 
 bool AvatarInputs::getIgnoreRadiusEnabled() const {
     return DependencyManager::get<NodeList>()->getIgnoreRadiusEnabled();
-}
-
-void AvatarInputs::toggleCameraMute() {
-    FaceTracker* faceTracker = qApp->getSelectedFaceTracker();
-    if (faceTracker) {
-        faceTracker->toggleMute();
-    }
 }
 
 void AvatarInputs::resetSensors() {

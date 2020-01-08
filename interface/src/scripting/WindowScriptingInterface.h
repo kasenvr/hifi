@@ -206,7 +206,7 @@ public slots:
     void browseAsync(const QString& title = "", const QString& directory = "",  const QString& nameFilter = "");
 
     /**jsdoc
-     * Prompts the user to specify the path and name of a file to save to. Displays a model dialog that navigates the directory
+     * Prompts the user to specify the path and name of a file to save to. Displays a modal dialog that navigates the directory
      * tree and allows the user to type in a file name.
      * @function Window.save
      * @param {string} [title=""] - The title to display at the top of the dialog.
@@ -222,7 +222,7 @@ public slots:
     QScriptValue save(const QString& title = "", const QString& directory = "",  const QString& nameFilter = "");
 
     /**jsdoc
-     * Prompts the user to specify the path and name of a file to save to. Displays a non-model dialog that navigates the
+     * Prompts the user to specify the path and name of a file to save to. Displays a non-modal dialog that navigates the
      * directory tree and allows the user to type in a file name. A {@link Window.saveFileChanged|saveFileChanged} signal is
      * emitted when a file is specified; no signal is emitted if the user cancels the dialog.
      * @function Window.saveAsync
@@ -326,10 +326,10 @@ public slots:
      *     full resolution is used (window dimensions in desktop mode; HMD display dimensions in HMD mode), otherwise one of the
      *     dimensions is adjusted in order to match the aspect ratio.
      * @param {string} [filename=""] - If a filename is not provided, the image is saved as "hifi-snap-by-&lt;user 
-     *     name&gt-on-YYYY-MM-DD_HH-MM-SS".<br />
-     *     Still images are saved in JPEG or PNG format according to the extension provided &mdash; <code>".jpg"</code>, 
+     *     name&gt;-on-YYYY-MM-DD_HH-MM-SS".
+     *     <p>Still images are saved in JPEG or PNG format according to the extension provided &mdash; <code>".jpg"</code>, 
      *     <code>".jpeg"</code>, or <code>".png"</code> &mdash; or if not provided then in JPEG format with an extension of 
-     *     <code>".jpg"</code>. Animated images are saved in GIF format.
+     *     <code>".jpg"</code>. Animated images are saved in GIF format.</p>
      *
      * @example <caption>Using the snapshot function and signals.</caption>
      * function onStillSnapshotTaken(path, notify) {
@@ -365,10 +365,10 @@ public slots:
      * @param {boolean} [notify=true] - This value is passed on through the {@link Window.stillSnapshotTaken|stillSnapshotTaken}
      *     signal.
      * @param {string} [filename=""] - If a filename is not provided, the image is saved as "hifi-snap-by-&lt;user
-     *     name&gt-on-YYYY-MM-DD_HH-MM-SS".<br />
-     *     Images are saved in JPEG or PNG format according to the extension provided &mdash; <code>".jpg"</code>,
+     *     name&gt;-on-YYYY-MM-DD_HH-MM-SS".
+     *     <p>Images are saved in JPEG or PNG format according to the extension provided &mdash; <code>".jpg"</code>,
      *     <code>".jpeg"</code>, or <code>".png"</code> &mdash; or if not provided then in JPEG format with an extension of
-     *     <code>".jpg"</code>.
+     *     <code>".jpg"</code>.</p>
      */
     void takeSecondaryCameraSnapshot(const bool& notify = true, const QString& filename = QString());
 
@@ -384,10 +384,10 @@ public slots:
      * @param {boolean} [notify=true] - This value is passed on through the {@link Window.stillSnapshotTaken|stillSnapshotTaken}
      *     signal.
      * @param {string} [filename=""] - If a filename is not provided, the image is saved as "hifi-snap-by-&lt;user
-     *     name&gt-on-YYYY-MM-DD_HH-MM-SS".<br />
-     *     Images are saved in JPEG or PNG format according to the extension provided &mdash; <code>".jpg"</code>,
+     *     name&gt;-on-YYYY-MM-DD_HH-MM-SS".
+     *     <p>Images are saved in JPEG or PNG format according to the extension provided &mdash; <code>".jpg"</code>,
      *     <code>".jpeg"</code>, or <code>".png"</code> &mdash; or if not provided then in JPEG format with an extension of
-     *     <code>".jpg"</code>.
+     *     <code>".jpg"</code>.</p>
      */
     void takeSecondaryCamera360Snapshot(const glm::vec3& cameraPosition, const bool& cubemapOutputFormat = false, const bool& notify = true, const QString& filename = QString());
 
@@ -515,13 +515,13 @@ public slots:
 
     /**jsdoc
      * Opens a URL in the Interface window or other application, depending on the URL's scheme. The following schemes are 
-     * supported:<br />
+     * supported:
      * <ul>
      *   <li><code>hifi</code>: Navigate to the URL in Interface.</li>
      *   <li><code>hifiapp</code>: Open a system app in Interface.</li>
      * </ul>
-     * Other schemes will either be handled by the OS (e.g. <code>http</code>, <code>https</code>, or <code>mailto</code>) or 
-     * will display a dialog asking the user to confirm that they want to try to open the URL.
+     * <p>Other schemes will either be handled by the OS (e.g. <code>http</code>, <code>https</code>, or <code>mailto</code>) or 
+     * will display a dialog asking the user to confirm that they want to try to open the URL.</p>
      * @function Window.openUrl
      * @param {string} url - The URL to open.
      */
@@ -623,8 +623,8 @@ private slots:
 signals:
 
     /**jsdoc
-     * Triggered when you change the domain you're visiting. <strong>Warning:</strong> Is not emitted if you go to a domain 
-     * that isn't running.
+     * Triggered when you change the domain you're visiting.
+     * <p><strong>Warning:</strong> Is not emitted if you go to a domain that isn't running.</p>
      * @function Window.domainChanged
      * @param {string} domainURL - The domain's URL.
      * @returns {Signal}
@@ -658,7 +658,8 @@ signals:
     /**jsdoc
      * Triggered when you try to visit a domain but are redirected into the error state.
      * @function Window.redirectErrorStateChanged
-     * @param {boolean} isInErrorState - If <code>true</code>, the user has been redirected to the error URL.
+     * @param {boolean} isInErrorState - <code>true</code> if the user has been redirected to the error URL, <code>false</code> 
+     *     if they haven't.
      * @returns {Signal}
      */
     void redirectErrorStateChanged(bool isInErrorState);
@@ -666,8 +667,8 @@ signals:
     /**jsdoc
      * Triggered when the interstitial mode changes.
      * @function Window.interstitialModeChanged
-     * @param {bool} interstitialMode - The new interstitial mode value. If <code>true</code>, the interstitial graphics are 
-     * displayed when the domain is loading.
+     * @param {boolean} interstitialMode - <code>true</code> if the interstitial graphics are displayed when the domain is 
+     *     loading, <code>false</code> if they are not.
      * @returns {Signal}
      */
     void interstitialModeChanged(bool interstitialMode);
@@ -812,6 +813,17 @@ signals:
      * Window.geometryChanged.connect(onWindowGeometryChanged);
      */
     void geometryChanged(QRect geometry);
+
+
+    /**jsdoc
+     * Triggered when "minimized" state of the Interface window changes.
+     * @function Window.minimizedChanged
+     * @param {bool} isMinimized - true if the Interface window is now minimized; false otherwise.
+     * @returns {Signal}
+     *
+     * Window.minimizedChanged.connect(onWindowMinimizedChanged);
+     */
+    void minimizedChanged(bool isMinimized);
 
 private:
     QString getPreviousBrowseLocation() const;

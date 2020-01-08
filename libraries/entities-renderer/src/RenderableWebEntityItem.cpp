@@ -24,6 +24,7 @@
 #include <ui/OffscreenQmlSurface.h>
 #include <ui/TabletScriptingInterface.h>
 #include <EntityScriptingInterface.h>
+#include <shared/LocalFileAccessGate.h>
 
 #include "EntitiesRendererLogging.h"
 #include <NetworkingConstants.h>
@@ -111,42 +112,6 @@ bool WebEntityRenderer::needsRenderUpdateFromTypedEntity(const TypedEntityPointe
             return true;
         }
 
-        if (_color != entity->getColor()) {
-            return true;
-        }
-
-        if (_alpha != entity->getAlpha()) {
-            return true;
-        }
-
-        if (_billboardMode != entity->getBillboardMode()) {
-            return true;
-        }
-
-        if (_sourceURL != entity->getSourceUrl()) {
-            return true;
-        }
-
-        if (_dpi != entity->getDPI()) {
-            return true;
-        }
-
-        if (_scriptURL != entity->getScriptURL()) {
-            return true;
-        }
-
-        if (_maxFPS != entity->getMaxFPS()) {
-            return true;
-        }
-
-        if (_inputMode != entity->getInputMode()) {
-            return true;
-        }
-
-        if (_pulseProperties != entity->getPulseProperties()) {
-            return true;
-        }
-
         return false;
     })) {
         return true;
@@ -216,14 +181,23 @@ void WebEntityRenderer::doRenderUpdateSynchronousTyped(const ScenePointer& scene
         }
 
         // This work must be done on the main thread
+        bool localSafeContext = entity->getLocalSafeContext();
         if (!_webSurface) {
+            if (localSafeContext) {
+                ::hifi::scripting::setLocalAccessSafeThread(true);
+            }
             buildWebSurface(entity, newSourceURL);
+            ::hifi::scripting::setLocalAccessSafeThread(false);
         }
 
         if (_webSurface) {
             if (_webSurface->getRootItem()) {
                 if (_contentType == ContentType::HtmlContent && _sourceURL != newSourceURL) {
+                    if (localSafeContext) {
+                        ::hifi::scripting::setLocalAccessSafeThread(true);
+                    }
                     _webSurface->getRootItem()->setProperty(URL_PROPERTY, newSourceURL);
+                    ::hifi::scripting::setLocalAccessSafeThread(false);
                     _sourceURL = newSourceURL;
                 } else if (_contentType != ContentType::HtmlContent) {
                     _sourceURL = newSourceURL;
@@ -315,12 +289,19 @@ void WebEntityRenderer::doRender(RenderArgs* args) {
     gpu::Batch& batch = *args->_batch;
     glm::vec4 color;
     Transform transform;
+    bool forward;
     withReadLock([&] {
         float fadeRatio = _isFading ? Interpolate::calculateFadeRatio(_fadeStartTime) : 1.0f;
         color = glm::vec4(toGlm(_color), _alpha * fadeRatio);
         color = EntityRenderer::calculatePulseColor(color, _pulseProperties, _created);
         transform = _renderTransform;
+        forward = _renderLayer != RenderLayer::WORLD || args->_renderMethod == render::Args::FORWARD;
     });
+
+    if (color.a == 0.0f) {
+        return;
+    }
+
     batch.setResourceTexture(0, _texture);
 
     transform.setRotation(EntityItem::getBillboardRotation(transform.getTranslation(), transform.getRotation(), _billboardMode, args->getViewFrustum().getPosition()));
@@ -328,7 +309,7 @@ void WebEntityRenderer::doRender(RenderArgs* args) {
 
     // Turn off jitter for these entities
     batch.pushProjectionJitter();
-    DependencyManager::get<GeometryCache>()->bindWebBrowserProgram(batch, color.a < OPAQUE_ALPHA_THRESHOLD);
+    DependencyManager::get<GeometryCache>()->bindWebBrowserProgram(batch, color.a < OPAQUE_ALPHA_THRESHOLD, forward);
     DependencyManager::get<GeometryCache>()->renderQuad(batch, topLeft, bottomRight, texMin, texMax, color, _geometryId);
     batch.popProjectionJitter();
     batch.setResourceTexture(0, nullptr);

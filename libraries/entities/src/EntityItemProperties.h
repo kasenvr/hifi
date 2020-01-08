@@ -32,6 +32,7 @@
 #include <OctreeConstants.h>
 #include <ShapeInfo.h>
 #include <ColorUtils.h>
+#include "FontFamilies.h"
 
 #include "EntityItemID.h"
 #include "EntityItemPropertiesDefaults.h"
@@ -64,6 +65,7 @@
 #include "PrimitiveMode.h"
 #include "WebInputMode.h"
 #include "GizmoType.h"
+#include "TextEffect.h"
 
 const quint64 UNKNOWN_CREATED_TIME = 0;
 
@@ -116,7 +118,8 @@ class EntityItemProperties {
     friend class MaterialEntityItem;
 public:
     static bool blobToProperties(QScriptEngine& scriptEngine, const QByteArray& blob, EntityItemProperties& properties);
-    static void propertiesToBlob(QScriptEngine& scriptEngine, const QUuid& myAvatarID, const EntityItemProperties& properties, QByteArray& blob);
+    static void propertiesToBlob(QScriptEngine& scriptEngine, const QUuid& myAvatarID, const EntityItemProperties& properties, 
+        QByteArray& blob, bool allProperties = false);
 
     EntityItemProperties(EntityPropertyFlags desiredProperties = EntityPropertyFlags());
     virtual ~EntityItemProperties() = default;
@@ -315,6 +318,10 @@ public:
     DEFINE_PROPERTY_REF(PROP_TOP_MARGIN, TopMargin, topMargin, float, TextEntityItem::DEFAULT_MARGIN);
     DEFINE_PROPERTY_REF(PROP_BOTTOM_MARGIN, BottomMargin, bottomMargin, float, TextEntityItem::DEFAULT_MARGIN);
     DEFINE_PROPERTY_REF(PROP_UNLIT, Unlit, unlit, bool, false);
+    DEFINE_PROPERTY_REF(PROP_FONT, Font, font, QString, ROBOTO_FONT_FAMILY);
+    DEFINE_PROPERTY_REF_ENUM(PROP_TEXT_EFFECT, TextEffect, textEffect, TextEffect, TextEffect::NO_EFFECT);
+    DEFINE_PROPERTY_REF(PROP_TEXT_EFFECT_COLOR, TextEffectColor, textEffectColor, u8vec3Color, TextEntityItem::DEFAULT_TEXT_COLOR);
+    DEFINE_PROPERTY(PROP_TEXT_EFFECT_THICKNESS, TextEffectThickness, textEffectThickness, float, TextEntityItem::DEFAULT_TEXT_EFFECT_THICKNESS);
 
     // Zone
     DEFINE_PROPERTY_GROUP(KeyLight, keyLight, KeyLightPropertyGroup);
@@ -331,6 +338,7 @@ public:
     DEFINE_PROPERTY_REF_ENUM(PROP_HAZE_MODE, HazeMode, hazeMode, uint32_t, (uint32_t)COMPONENT_MODE_INHERIT);
     DEFINE_PROPERTY_REF_ENUM(PROP_BLOOM_MODE, BloomMode, bloomMode, uint32_t, (uint32_t)COMPONENT_MODE_INHERIT);
     DEFINE_PROPERTY_REF_ENUM(PROP_AVATAR_PRIORITY, AvatarPriority, avatarPriority, uint32_t, (uint32_t)COMPONENT_MODE_INHERIT);
+    DEFINE_PROPERTY_REF_ENUM(PROP_SCREENSHARE, Screenshare, screenshare, uint32_t, (uint32_t)COMPONENT_MODE_INHERIT);
 
     // Polyvox
     DEFINE_PROPERTY_REF(PROP_VOXEL_VOLUME_SIZE, VoxelVolumeSize, voxelVolumeSize, glm::vec3, PolyVoxEntityItem::DEFAULT_VOXEL_VOLUME_SIZE);
@@ -692,6 +700,8 @@ inline QDebug operator<<(QDebug debug, const EntityItemProperties& properties) {
     DEBUG_PROPERTY_IF_CHANGED(debug, properties, FilterURL, filterURL, "");
 
     DEBUG_PROPERTY_IF_CHANGED(debug, properties, AvatarPriority, avatarPriority, "");
+
+    DEBUG_PROPERTY_IF_CHANGED(debug, properties, Screenshare, screenshare, "");
 
     DEBUG_PROPERTY_IF_CHANGED(debug, properties, EntityHostTypeAsString, entityHostType, "");
     DEBUG_PROPERTY_IF_CHANGED(debug, properties, OwningAvatarID, owningAvatarID, "");

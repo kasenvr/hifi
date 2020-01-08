@@ -24,7 +24,7 @@
 #endif
 
 #ifdef WIN32
-#define WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN 1
 #include <windows.h>
 #include <Mmsystem.h>
 #include <mmdeviceapi.h>
@@ -39,6 +39,7 @@
 #include <QtMultimedia/QAudioInput>
 #include <QtMultimedia/QAudioOutput>
 
+#include <shared/QtHelpers.h>
 #include <ThreadHelpers.h>
 #include <NodeList.h>
 #include <plugins/CodecPlugin.h>
@@ -60,25 +61,13 @@ const int AudioClient::MIN_BUFFER_FRAMES = 1;
 
 const int AudioClient::MAX_BUFFER_FRAMES = 20;
 
-static const int RECEIVED_AUDIO_STREAM_CAPACITY_FRAMES = 100;
-
 #if defined(Q_OS_ANDROID)
 static const int CHECK_INPUT_READS_MSECS = 2000;
 static const int MIN_READS_TO_CONSIDER_INPUT_ALIVE = 10;
 #endif
 
-static const auto DEFAULT_POSITION_GETTER = []{ return Vectors::ZERO; };
-static const auto DEFAULT_ORIENTATION_GETTER = [] { return Quaternions::IDENTITY; };
-
-static const int DEFAULT_BUFFER_FRAMES = 1;
-
-// OUTPUT_CHANNEL_COUNT is audio pipeline output format, which is always 2 channel.
-// _outputFormat.channelCount() is device output format, which may be 1 or multichannel.
-static const int OUTPUT_CHANNEL_COUNT = 2;
-
-static const bool DEFAULT_STARVE_DETECTION_ENABLED = true;
-static const int STARVE_DETECTION_THRESHOLD = 3;
-static const int STARVE_DETECTION_PERIOD = 10 * 1000; // 10 Seconds
+const AudioClient::AudioPositionGetter  AudioClient::DEFAULT_POSITION_GETTER = []{ return Vectors::ZERO; };
+const AudioClient::AudioOrientationGetter AudioClient::DEFAULT_ORIENTATION_GETTER = [] { return Quaternions::IDENTITY; };
 
 Setting::Handle<bool> dynamicJitterBufferEnabled("dynamicJitterBuffersEnabled",
     InboundAudioStream::DEFAULT_DYNAMIC_JITTER_BUFFER_ENABLED);
@@ -91,11 +80,63 @@ using Lock = std::unique_lock<Mutex>;
 Mutex _deviceMutex;
 Mutex _recordMutex;
 
+QString defaultAudioDeviceName(QAudio::Mode mode);
+
+void AudioClient::setHmdAudioName(QAudio::Mode mode, const QString& name) {
+    QWriteLocker lock(&_hmdNameLock);
+    if (mode == QAudio::AudioInput) {
+        _hmdInputName = name;
+    } else {
+        _hmdOutputName = name;
+    }
+}
+
 // thread-safe
-QList<QAudioDeviceInfo> getAvailableDevices(QAudio::Mode mode) {
+QList<HifiAudioDeviceInfo> getAvailableDevices(QAudio::Mode mode, const QString& hmdName) {
+    //get hmd device name prior to locking device mutex. in case of shutdown, this thread will be locked and audio client
+    //cannot properly shut down. 
+    QString defDeviceName = defaultAudioDeviceName(mode);
+
     // NOTE: availableDevices() clobbers the Qt internal device list
     Lock lock(_deviceMutex);
-    return QAudioDeviceInfo::availableDevices(mode);
+    auto devices = QAudioDeviceInfo::availableDevices(mode);
+
+    HifiAudioDeviceInfo defaultDesktopDevice;
+    QList<HifiAudioDeviceInfo> newDevices;
+    for (auto& device : devices) {
+        newDevices.push_back(HifiAudioDeviceInfo(device, false, mode));
+        if (device.deviceName() == defDeviceName.trimmed()) {
+            defaultDesktopDevice = HifiAudioDeviceInfo(device, true, mode, HifiAudioDeviceInfo::desktop);
+        }
+    }
+
+    if (defaultDesktopDevice.getDevice().isNull()) {
+        if (devices.size() > 0) {
+            qCDebug(audioclient) << __FUNCTION__ << "Default device not found in list:" << defDeviceName
+                << "Setting Default to: " << devices.first().deviceName();
+            newDevices.push_front(HifiAudioDeviceInfo(devices.first(), true, mode, HifiAudioDeviceInfo::desktop));
+        } else {
+            //current audio list is empty for some reason.
+            qCDebug(audioclient) << __FUNCTION__ << "Default device not found in list no alternative selection available";
+        }
+    } else {
+        newDevices.push_front(defaultDesktopDevice);
+    }
+
+    if (!hmdName.isNull()) {
+        HifiAudioDeviceInfo hmdDevice;
+        foreach(auto device, newDevices) {
+            if (device.getDevice().deviceName() == hmdName) {
+                hmdDevice = HifiAudioDeviceInfo(device.getDevice(), true, mode, HifiAudioDeviceInfo::hmd);
+                break;
+            }
+        }
+        
+        if (!hmdDevice.getDevice().isNull()) {
+            newDevices.push_front(hmdDevice);
+        }
+    }
+    return newDevices;
 }
 
 // now called from a background thread, to keep blocking operations off the audio thread
@@ -107,37 +148,49 @@ void AudioClient::checkDevices() {
         return;
     }
 
-    auto inputDevices = getAvailableDevices(QAudio::AudioInput);
-    auto outputDevices = getAvailableDevices(QAudio::AudioOutput);
-
-    Lock lock(_deviceMutex);
-    if (inputDevices != _inputDevices) {
-        _inputDevices.swap(inputDevices);
-        emit devicesChanged(QAudio::AudioInput, _inputDevices);
+    QString hmdInputName;
+    QString hmdOutputName;
+    {
+        QReadLocker readLock(&_hmdNameLock);
+        hmdInputName = _hmdInputName;
+        hmdOutputName = _hmdOutputName;
     }
 
-    if (outputDevices != _outputDevices) {
-        _outputDevices.swap(outputDevices);
-        emit devicesChanged(QAudio::AudioOutput, _outputDevices);
-    }
+    auto inputDevices = getAvailableDevices(QAudio::AudioInput, hmdInputName);
+    auto outputDevices = getAvailableDevices(QAudio::AudioOutput, hmdOutputName);
+   
+    static const QMetaMethod devicesChangedSig= QMetaMethod::fromSignal(&AudioClient::devicesChanged);
+    //only emit once the scripting interface has connected to the signal
+    if (isSignalConnected(devicesChangedSig)) {
+        Lock lock(_deviceMutex);
+        if (inputDevices != _inputDevices) {
+            _inputDevices.swap(inputDevices);
+            emit devicesChanged(QAudio::AudioInput, _inputDevices);
+        }
+
+        if (outputDevices != _outputDevices) {
+            _outputDevices.swap(outputDevices);
+            emit devicesChanged(QAudio::AudioOutput, _outputDevices);
+        }
+    } 
 }
 
-QAudioDeviceInfo AudioClient::getActiveAudioDevice(QAudio::Mode mode) const {
+HifiAudioDeviceInfo AudioClient::getActiveAudioDevice(QAudio::Mode mode) const {
     Lock lock(_deviceMutex);
 
     if (mode == QAudio::AudioInput) {
         return _inputDeviceInfo;
-    } else { // if (mode == QAudio::AudioOutput)
+    } else {
         return _outputDeviceInfo;
     }
 }
 
-QList<QAudioDeviceInfo> AudioClient::getAudioDevices(QAudio::Mode mode) const {
+QList<HifiAudioDeviceInfo> AudioClient::getAudioDevices(QAudio::Mode mode) const {
     Lock lock(_deviceMutex);
 
     if (mode == QAudio::AudioInput) {
         return _inputDevices;
-    } else { // if (mode == QAudio::AudioOutput)
+    } else {
         return _outputDevices;
     }
 }
@@ -170,26 +223,20 @@ static void channelDownmix(int16_t* source, int16_t* dest, int numSamples) {
     }
 }
 
-static float computeLoudness(int16_t* samples, int numSamples, int numChannels, bool& isClipping) {
+static bool detectClipping(int16_t* samples, int numSamples, int numChannels) {
 
     const int32_t CLIPPING_THRESHOLD = 32392;   // -0.1 dBFS
-    const int32_t CLIPPING_DETECTION = 3;       // consecutive samples over threshold
+    const int CLIPPING_DETECTION = 3;           // consecutive samples over threshold
 
-    float scale = numSamples ? 1.0f / numSamples : 0.0f;
-
-    int32_t loudness = 0;
-    isClipping = false;
+    bool isClipping = false;
 
     if (numChannels == 2) {
-        int32_t oversLeft = 0;
-        int32_t oversRight = 0;
+        int oversLeft = 0;
+        int oversRight = 0;
 
         for (int i = 0; i < numSamples/2; i++) {
             int32_t left = std::abs((int32_t)samples[2*i+0]);
             int32_t right = std::abs((int32_t)samples[2*i+1]);
-
-            loudness += left;
-            loudness += right;
 
             if (left > CLIPPING_THRESHOLD) {
                 isClipping |= (++oversLeft >= CLIPPING_DETECTION);
@@ -203,12 +250,10 @@ static float computeLoudness(int16_t* samples, int numSamples, int numChannels, 
             }
         }
     } else {
-        int32_t overs = 0;
+        int overs = 0;
 
         for (int i = 0; i < numSamples; i++) {
             int32_t sample = std::abs((int32_t)samples[i]);
-
-            loudness += sample;
 
             if (sample > CLIPPING_THRESHOLD) {
                 isClipping |= (++overs >= CLIPPING_DETECTION);
@@ -218,12 +263,23 @@ static float computeLoudness(int16_t* samples, int numSamples, int numChannels, 
         }
     }
 
+    return isClipping;
+}
+
+static float computeLoudness(int16_t* samples, int numSamples) {
+
+    float scale = numSamples ? 1.0f / numSamples : 0.0f;
+
+    int32_t loudness = 0;
+    for (int i = 0; i < numSamples; i++) {
+        loudness += std::abs((int32_t)samples[i]);
+    }
     return (float)loudness * scale;
 }
 
 template <int NUM_CHANNELS>
 static void applyGainSmoothing(float* buffer, int numFrames, float gain0, float gain1) {
-
+    
     // fast path for unity gain
     if (gain0 == 1.0f && gain1 == 1.0f) {
         return;
@@ -238,7 +294,7 @@ static void applyGainSmoothing(float* buffer, int numFrames, float gain0, float 
     float tStep = 1.0f / numFrames;
 
     for (int i = 0; i < numFrames; i++) {
-
+   
         // evaluate poly over t=[0,1)
         float gain = (c3 * t + c2) * t * t + c0;
         t += tStep;
@@ -254,54 +310,8 @@ static inline float convertToFloat(int16_t sample) {
     return (float)sample * (1 / 32768.0f);
 }
 
-AudioClient::AudioClient() :
-    AbstractAudioInterface(),
-    _gate(this),
-    _audioInput(NULL),
-    _dummyAudioInput(NULL),
-    _desiredInputFormat(),
-    _inputFormat(),
-    _numInputCallbackBytes(0),
-    _audioOutput(NULL),
-    _desiredOutputFormat(),
-    _outputFormat(),
-    _outputFrameSize(0),
-    _numOutputCallbackBytes(0),
-    _loopbackAudioOutput(NULL),
-    _loopbackOutputDevice(NULL),
-    _inputRingBuffer(0),
-    _localInjectorsStream(0, 1),
-    _receivedAudioStream(RECEIVED_AUDIO_STREAM_CAPACITY_FRAMES),
-    _isStereoInput(false),
-    _outputStarveDetectionStartTimeMsec(0),
-    _outputStarveDetectionCount(0),
-    _outputBufferSizeFrames("audioOutputBufferFrames", DEFAULT_BUFFER_FRAMES),
-    _sessionOutputBufferSizeFrames(_outputBufferSizeFrames.get()),
-    _outputStarveDetectionEnabled("audioOutputStarveDetectionEnabled", DEFAULT_STARVE_DETECTION_ENABLED),
-    _lastRawInputLoudness(0.0f),
-    _lastSmoothedRawInputLoudness(0.0f),
-    _lastInputLoudness(0.0f),
-    _timeSinceLastClip(-1.0f),
-    _muted(false),
-    _shouldEchoLocally(false),
-    _shouldEchoToServer(false),
-    _isNoiseGateEnabled(true),
-    _reverb(false),
-    _reverbOptions(&_scriptReverbOptions),
-    _inputToNetworkResampler(NULL),
-    _networkToOutputResampler(NULL),
-    _localToOutputResampler(NULL),
-    _loopbackResampler(NULL),
-    _audioLimiter(AudioConstants::SAMPLE_RATE, OUTPUT_CHANNEL_COUNT),
-    _outgoingAvatarAudioSequenceNumber(0),
-    _audioOutputIODevice(_localInjectorsStream, _receivedAudioStream, this),
-    _stats(&_receivedAudioStream),
-    _positionGetter(DEFAULT_POSITION_GETTER),
-#if defined(Q_OS_ANDROID)
-    _checkInputTimer(this),
-    _isHeadsetPluggedIn(false),
-#endif
-    _orientationGetter(DEFAULT_ORIENTATION_GETTER) {
+AudioClient::AudioClient() {
+
     // avoid putting a lock in the device callback
     assert(_localSamplesAvailable.is_lock_free());
 
@@ -316,17 +326,17 @@ AudioClient::AudioClient() :
     }
 
     connect(&_receivedAudioStream, &MixedProcessedAudioStream::processSamples,
-            this, &AudioClient::processReceivedSamples, Qt::DirectConnection);
-    connect(this, &AudioClient::changeDevice, this, [=](const QAudioDeviceInfo& outputDeviceInfo) {
-        qCDebug(audioclient) << "got AudioClient::changeDevice signal, about to call switchOutputToAudioDevice() outputDeviceInfo: [" << outputDeviceInfo.deviceName() << "]";
+	    this, &AudioClient::processReceivedSamples, Qt::DirectConnection);
+    connect(this, &AudioClient::changeDevice, this, [=](const HifiAudioDeviceInfo& outputDeviceInfo) {
+        qCDebug(audioclient)<< "got AudioClient::changeDevice signal, about to call switchOutputToAudioDevice() outputDeviceInfo: ["<< outputDeviceInfo.deviceName() << "]";
         switchOutputToAudioDevice(outputDeviceInfo);
     });
 
     connect(&_receivedAudioStream, &InboundAudioStream::mismatchedAudioCodec, this, &AudioClient::handleMismatchAudioFormat);
 
     // initialize wasapi; if getAvailableDevices is called from the CheckDevicesThread before this, it will crash
-    getAvailableDevices(QAudio::AudioInput);
-    getAvailableDevices(QAudio::AudioOutput);
+    defaultAudioDeviceName(QAudio::AudioInput);
+    defaultAudioDeviceName(QAudio::AudioOutput);
 
     // start a thread to detect any device changes
     _checkDevicesTimer = new QTimer(this);
@@ -353,6 +363,10 @@ AudioClient::AudioClient() :
 
     configureReverb();
 
+#if defined(WEBRTC_ENABLED)
+    configureWebrtc();
+#endif
+
     auto nodeList = DependencyManager::get<NodeList>();
     auto& packetReceiver = nodeList->getPacketReceiver();
     packetReceiver.registerListener(PacketType::AudioStreamStats, &_stats, "processStreamStatsPacket");
@@ -364,7 +378,7 @@ AudioClient::AudioClient() :
     packetReceiver.registerListener(PacketType::SelectedAudioFormat, this, "handleSelectedAudioFormat");
 
     auto& domainHandler = nodeList->getDomainHandler();
-    connect(&domainHandler, &DomainHandler::disconnectedFromDomain, this, [this] {
+    connect(&domainHandler, &DomainHandler::disconnectedFromDomain, this, [this] { 
         _solo.reset();
     });
     connect(nodeList.data(), &NodeList::nodeActivated, this, [this](SharedNodePointer node) {
@@ -422,15 +436,16 @@ void AudioClient::setAudioPaused(bool pause) {
     }
 }
 
-QAudioDeviceInfo getNamedAudioDeviceForMode(QAudio::Mode mode, const QString& deviceName) {
-    QAudioDeviceInfo result;
-    foreach(QAudioDeviceInfo audioDevice, getAvailableDevices(mode)) {
+HifiAudioDeviceInfo getNamedAudioDeviceForMode(QAudio::Mode mode, const QString& deviceName, const QString& hmdName, bool isHmd=false) {
+    HifiAudioDeviceInfo result;
+    foreach (HifiAudioDeviceInfo audioDevice, getAvailableDevices(mode,hmdName)) {
         if (audioDevice.deviceName().trimmed() == deviceName.trimmed()) {
-            result = audioDevice;
-            break;
+            if ((!isHmd && audioDevice.getDeviceType() != HifiAudioDeviceInfo::hmd) || (isHmd && audioDevice.getDeviceType() != HifiAudioDeviceInfo::desktop)) {
+                result = audioDevice;
+                break;
+            }
         }
     }
-
     return result;
 }
 
@@ -478,9 +493,41 @@ QString AudioClient::getWinDeviceName(wchar_t* guid) {
 
 #endif
 
-QAudioDeviceInfo defaultAudioDeviceForMode(QAudio::Mode mode) {
+HifiAudioDeviceInfo defaultAudioDeviceForMode(QAudio::Mode mode, const QString& hmdName) {
+    QString deviceName = defaultAudioDeviceName(mode);
+#if defined (Q_OS_ANDROID)
+    if (mode == QAudio::AudioInput) {
+        Setting::Handle<bool> enableAEC(SETTING_AEC_KEY, DEFAULT_AEC_ENABLED);
+        bool aecEnabled = enableAEC.get();
+        auto audioClient = DependencyManager::get<AudioClient>();
+        bool headsetOn = audioClient ? audioClient->isHeadsetPluggedIn() : false;
+        for (QAudioDeviceInfo inputDevice : QAudioDeviceInfo::availableDevices(mode)) {
+            if (((headsetOn || !aecEnabled) && inputDevice.deviceName() == VOICE_RECOGNITION) ||
+                ((!headsetOn && aecEnabled) && inputDevice.deviceName() == VOICE_COMMUNICATION)) {
+                return HifiAudioDeviceInfo(inputDevice, false, QAudio::AudioInput);
+            }
+        }
+    }
+#endif
+    return getNamedAudioDeviceForMode(mode, deviceName, hmdName);
+}
+
+QString defaultAudioDeviceName(QAudio::Mode mode) {
+    QString deviceName;
+
 #ifdef __APPLE__
-    if (getAvailableDevices(mode).size() > 1) {
+    QAudioDeviceInfo device;
+    if (mode == QAudio::AudioInput) {
+        device = QAudioDeviceInfo::defaultInputDevice();
+    } else {
+        device = QAudioDeviceInfo::defaultOutputDevice();
+    }
+    if (!device.isNull()) {
+        if (!device.deviceName().isEmpty()) {
+            deviceName = device.deviceName();
+        }
+    } else {
+        qDebug() << "QT's Default device is null, reverting to platoform code";
         AudioDeviceID defaultDeviceID = 0;
         uint32_t propertySize = sizeof(AudioDeviceID);
         AudioObjectPropertyAddress propertyAddress = {
@@ -502,25 +549,19 @@ QAudioDeviceInfo defaultAudioDeviceForMode(QAudio::Mode mode) {
                                                                &defaultDeviceID);
 
         if (!getPropertyError && propertySize) {
-            CFStringRef deviceName = NULL;
-            propertySize = sizeof(deviceName);
+            CFStringRef devName = NULL;
+            propertySize = sizeof(devName);
             propertyAddress.mSelector = kAudioDevicePropertyDeviceNameCFString;
             getPropertyError = AudioObjectGetPropertyData(defaultDeviceID, &propertyAddress, 0,
-                                                          NULL, &propertySize, &deviceName);
+                                                          NULL, &propertySize, &devName);
 
             if (!getPropertyError && propertySize) {
-                // find a device in the list that matches the name we have and return it
-                foreach(QAudioDeviceInfo audioDevice, getAvailableDevices(mode)) {
-                    if (audioDevice.deviceName() == CFStringGetCStringPtr(deviceName, kCFStringEncodingMacRoman)) {
-                        return audioDevice;
-                    }
-                }
+                deviceName = CFStringGetCStringPtr(devName, kCFStringEncodingMacRoman);
             }
         }
     }
 #endif
 #ifdef WIN32
-    QString deviceName;
     //Check for Windows Vista or higher, IMMDeviceEnumerator doesn't work below that.
     if (!IsWindowsVistaOrGreater()) { // lower then vista
         if (mode == QAudio::AudioInput) {
@@ -529,7 +570,9 @@ QAudioDeviceInfo defaultAudioDeviceForMode(QAudio::Mode mode) {
             waveInGetDevCaps(WAVE_MAPPER, &wic, sizeof(wic));
             //Use the received manufacturer id to get the device's real name
             waveInGetDevCaps(wic.wMid, &wic, sizeof(wic));
+#if !defined(NDEBUG) 
             qCDebug(audioclient) << "input device:" << wic.szPname;
+#endif
             deviceName = wic.szPname;
         } else {
             WAVEOUTCAPS woc;
@@ -537,7 +580,9 @@ QAudioDeviceInfo defaultAudioDeviceForMode(QAudio::Mode mode) {
             waveOutGetDevCaps(WAVE_MAPPER, &woc, sizeof(woc));
             //Use the received manufacturer id to get the device's real name
             waveOutGetDevCaps(woc.wMid, &woc, sizeof(woc));
+#if !defined(NDEBUG) 
             qCDebug(audioclient) << "output device:" << woc.szPname;
+#endif
             deviceName = woc.szPname;
         }
     } else {
@@ -560,41 +605,33 @@ QAudioDeviceInfo defaultAudioDeviceForMode(QAudio::Mode mode) {
         CoUninitialize();
     }
 
-    qCDebug(audioclient) << "defaultAudioDeviceForMode mode: " << (mode == QAudio::AudioOutput ? "Output" : "Input")
-        << " [" << deviceName << "] [" << getNamedAudioDeviceForMode(mode, deviceName).deviceName() << "]";
-
-    return getNamedAudioDeviceForMode(mode, deviceName);
+#if !defined(NDEBUG) 
+    qCDebug(audioclient) << "defaultAudioDeviceForMode mode: " << (mode == QAudio::AudioOutput ? "Output" : "Input") 
+	<< " [" << deviceName << "] [" << "]";
 #endif
 
-#if defined (Q_OS_ANDROID)
-    if (mode == QAudio::AudioInput) {
-        Setting::Handle<bool> enableAEC(SETTING_AEC_KEY, DEFAULT_AEC_ENABLED);
-        bool aecEnabled = enableAEC.get();
-        auto audioClient = DependencyManager::get<AudioClient>();
-        bool headsetOn = audioClient? audioClient->isHeadsetPluggedIn() : false;
-        auto inputDevices = QAudioDeviceInfo::availableDevices(QAudio::AudioInput);
-        for (auto inputDevice : inputDevices) {
-            if (((headsetOn || !aecEnabled) && inputDevice.deviceName() == VOICE_RECOGNITION) ||
-                    ((!headsetOn && aecEnabled) && inputDevice.deviceName() == VOICE_COMMUNICATION)) {
-                return inputDevice;
-            }
-        }
-    }
 #endif
-    // fallback for failed lookup is the default device
-    return (mode == QAudio::AudioInput) ? QAudioDeviceInfo::defaultInputDevice() : QAudioDeviceInfo::defaultOutputDevice();
+   return deviceName;
 }
 
 bool AudioClient::getNamedAudioDeviceForModeExists(QAudio::Mode mode, const QString& deviceName) {
-    return (getNamedAudioDeviceForMode(mode, deviceName).deviceName() == deviceName);
+    QReadLocker readLock(&_hmdNameLock);
+    QString hmdName = mode == QAudio::AudioInput ? _hmdInputName : _hmdOutputName;
+    return (getNamedAudioDeviceForMode(mode, deviceName, hmdName).deviceName() == deviceName);
 }
 
 
 // attempt to use the native sample rate and channel count
-bool nativeFormatForAudioDevice(const QAudioDeviceInfo& audioDevice,
-                                QAudioFormat& audioFormat) {
+bool nativeFormatForAudioDevice(const QAudioDeviceInfo& audioDevice, QAudioFormat& audioFormat) {
 
     audioFormat = audioDevice.preferredFormat();
+
+    // converting to/from this rate must produce an integral number of samples
+    if ((audioFormat.sampleRate() <= 0) ||
+        (audioFormat.sampleRate() * AudioConstants::NETWORK_FRAME_SAMPLES_PER_CHANNEL % AudioConstants::SAMPLE_RATE != 0)) {
+        qCWarning(audioclient) << "The native sample rate [" << audioFormat.sampleRate() << "] is not supported.";
+        return false;
+    }
 
     audioFormat.setCodec("audio/pcm");
     audioFormat.setSampleSize(16);
@@ -603,12 +640,17 @@ bool nativeFormatForAudioDevice(const QAudioDeviceInfo& audioDevice,
 
     if (!audioDevice.isFormatSupported(audioFormat)) {
         qCWarning(audioclient) << "The native format is" << audioFormat << "but isFormatSupported() failed.";
-        return false;
-    }
-    // converting to/from this rate must produce an integral number of samples
-    if (audioFormat.sampleRate() * AudioConstants::NETWORK_FRAME_SAMPLES_PER_CHANNEL % AudioConstants::SAMPLE_RATE != 0) {
-        qCWarning(audioclient) << "The native sample rate [" << audioFormat.sampleRate() << "] is not supported.";
-        return false;
+
+        // attempt the native sample rate, with channels forced to 2
+        audioFormat.setChannelCount(2);
+        if (!audioDevice.isFormatSupported(audioFormat)) {
+
+            // attempt the native sample rate, with channels forced to 1
+            audioFormat.setChannelCount(1);
+            if (!audioDevice.isFormatSupported(audioFormat)) {
+                return false;
+            }
+        }
     }
     return true;
 }
@@ -623,29 +665,29 @@ bool adjustedFormatForAudioDevice(const QAudioDeviceInfo& audioDevice,
     if (IsWindows8OrGreater()) {
         // On Windows using WASAPI shared-mode, returns the internal mix format
         return nativeFormatForAudioDevice(audioDevice, adjustedAudioFormat);
-    }   // else enumerate formats
+    }  // else enumerate formats
 #endif
-    
+
 #if defined(Q_OS_MAC)
     // Mac OSX returns the preferred CoreAudio format
     return nativeFormatForAudioDevice(audioDevice, adjustedAudioFormat);
 #endif
-    
+
 #if defined(Q_OS_ANDROID)
     // As of Qt5.6, Android returns the native OpenSLES sample rate when possible, else 48000
     if (nativeFormatForAudioDevice(audioDevice, adjustedAudioFormat)) {
         return true;
-    }   // else enumerate formats
+    }  // else enumerate formats
 #endif
-    
+
     adjustedAudioFormat = desiredAudioFormat;
 
     //
     // Attempt the device sample rate and channel count in decreasing order of preference.
     //
     const int sampleRates[] = { 48000, 44100, 32000, 24000, 16000, 96000, 192000, 88200, 176400 };
-    const int inputChannels[] = { 1, 2, 4, 6, 8 };  // prefer mono
-    const int outputChannels[] = { 2, 4, 6, 8, 1 }; // prefer stereo, downmix as last resort
+    const int inputChannels[] = { 1, 2, 4, 6, 8 };   // prefer mono
+    const int outputChannels[] = { 2, 4, 6, 8, 1 };  // prefer stereo, downmix as last resort
 
     for (int channelCount : (desiredAudioFormat.channelCount() == 1 ? inputChannels : outputChannels)) {
         for (int sampleRate : sampleRates) {
@@ -737,24 +779,19 @@ void AudioClient::start() {
 
     _desiredOutputFormat = _desiredInputFormat;
     _desiredOutputFormat.setChannelCount(OUTPUT_CHANNEL_COUNT);
-
-    QAudioDeviceInfo inputDeviceInfo = defaultAudioDeviceForMode(QAudio::AudioInput);
-    qCDebug(audioclient) << "The default audio input device is" << inputDeviceInfo.deviceName();
-    bool inputFormatSupported = switchInputToAudioDevice(inputDeviceInfo);
-
-    QAudioDeviceInfo outputDeviceInfo = defaultAudioDeviceForMode(QAudio::AudioOutput);
-    qCDebug(audioclient) << "The default audio output device is" << outputDeviceInfo.deviceName();
-    bool outputFormatSupported = switchOutputToAudioDevice(outputDeviceInfo);
-
-    if (!inputFormatSupported) {
-        qCDebug(audioclient) << "Unable to set up audio input because of a problem with input format.";
-        qCDebug(audioclient) << "The closest format available is" << inputDeviceInfo.nearestFormat(_desiredInputFormat);
+    
+    QString inputName;
+    QString outputName;
+    {
+        QReadLocker readLock(&_hmdNameLock);
+        inputName = _hmdInputName;
+        outputName = _hmdOutputName;
     }
+    
+    //initialize input to the dummy device to prevent starves
+    switchInputToAudioDevice(HifiAudioDeviceInfo());
+    switchOutputToAudioDevice(defaultAudioDeviceForMode(QAudio::AudioOutput, QString())); 
 
-    if (!outputFormatSupported) {
-        qCDebug(audioclient) << "Unable to set up audio output because of a problem with output format.";
-        qCDebug(audioclient) << "The closest format available is" << outputDeviceInfo.nearestFormat(_desiredOutputFormat);
-    }
 #if defined(Q_OS_ANDROID)
     connect(&_checkInputTimer, &QTimer::timeout, this, &AudioClient::checkInputTimeout);
     _checkInputTimer.start(CHECK_INPUT_READS_MSECS);
@@ -763,10 +800,10 @@ void AudioClient::start() {
 
 void AudioClient::stop() {
     qCDebug(audioclient) << "AudioClient::stop(), requesting switchInputToAudioDevice() to shut down";
-    switchInputToAudioDevice(QAudioDeviceInfo(), true);
+    switchInputToAudioDevice(HifiAudioDeviceInfo(), true);
 
     qCDebug(audioclient) << "AudioClient::stop(), requesting switchOutputToAudioDevice() to shut down";
-    switchOutputToAudioDevice(QAudioDeviceInfo(), true);
+    switchOutputToAudioDevice(HifiAudioDeviceInfo(), true);
 
     // Stop triggering the checks
     QObject::disconnect(_checkPeakValuesTimer, &QTimer::timeout, nullptr, nullptr);
@@ -775,6 +812,7 @@ void AudioClient::stop() {
     // Destruction of the pointers will occur when the parent object (this) is destroyed)
     {
         Lock lock(_checkDevicesMutex);
+        _checkDevicesTimer->stop();
         _checkDevicesTimer = nullptr;
     }
     {
@@ -958,22 +996,27 @@ void AudioClient::selectAudioFormat(const QString& selectedCodecName) {
 
 }
 
-bool AudioClient::switchAudioDevice(QAudio::Mode mode, const QAudioDeviceInfo& deviceInfo) {
+bool AudioClient::switchAudioDevice(QAudio::Mode mode, const HifiAudioDeviceInfo& deviceInfo) {
     auto device = deviceInfo;
-
-    if (device.isNull()) {
-        device = defaultAudioDeviceForMode(mode);
+    if (deviceInfo.getDevice().isNull()) {
+        qCDebug(audioclient) << __FUNCTION__ << " switching to null device :" 
+            << deviceInfo.deviceName() << " : " << deviceInfo.getDevice().deviceName();
     }
 
     if (mode == QAudio::AudioInput) {
         return switchInputToAudioDevice(device);
-    } else { // if (mode == QAudio::AudioOutput)
+    } else {
         return switchOutputToAudioDevice(device);
     }
 }
 
-bool AudioClient::switchAudioDevice(QAudio::Mode mode, const QString& deviceName) {
-    return switchAudioDevice(mode, getNamedAudioDeviceForMode(mode, deviceName));
+bool AudioClient::switchAudioDevice(QAudio::Mode mode, const QString& deviceName, bool isHmd) {
+    QString hmdName;
+    {
+        QReadLocker readLock(&_hmdNameLock);
+        hmdName = mode == QAudio::AudioInput ? _hmdInputName : _hmdOutputName;
+    }
+    return switchAudioDevice(mode, getNamedAudioDeviceForMode(mode, deviceName, hmdName, isHmd));
 }
 
 void AudioClient::configureReverb() {
@@ -1010,7 +1053,7 @@ void AudioClient::configureReverb() {
     p.wetDryMix = 100.0f;
     p.preDelay = 0.0f;
     p.earlyGain = -96.0f;   // disable ER
-    p.lateGain += _reverbOptions->getWetDryMix() * (24.0f/100.0f) - 24.0f;  // -0dB to -24dB, based on wetDryMix
+    p.lateGain += _reverbOptions->getWetDryMix() * (24.0f / 100.0f) - 24.0f;  // -0dB to -24dB, based on wetDryMix
     p.lateMixLeft = 0.0f;
     p.lateMixRight = 0.0f;
 
@@ -1083,6 +1126,127 @@ void AudioClient::setReverbOptions(const AudioEffectOptions* options) {
         configureReverb();
     }
 }
+
+#if defined(WEBRTC_ENABLED)
+
+static void deinterleaveToFloat(const int16_t* src, float* const* dst, int numFrames, int numChannels) {
+    for (int i = 0; i < numFrames; i++) {
+        for (int ch = 0; ch < numChannels; ch++) {
+            float f = *src++;
+            f *= (1/32768.0f);  // scale
+            dst[ch][i] = f;     // deinterleave
+        }
+    }
+}
+
+static void interleaveToInt16(const float* const* src, int16_t* dst, int numFrames, int numChannels) {
+    for (int i = 0; i < numFrames; i++) {
+        for (int ch = 0; ch < numChannels; ch++) {
+            float f = src[ch][i];
+            f *= 32768.0f;                                  // scale
+            f += (f < 0.0f) ? -0.5f : 0.5f;                 // round
+            f = std::max(std::min(f, 32767.0f), -32768.0f); // saturate
+            *dst++ = (int16_t)f;                            // interleave
+        }
+    }
+}
+
+void AudioClient::configureWebrtc() {
+    _apm = webrtc::AudioProcessingBuilder().Create();
+
+    webrtc::AudioProcessing::Config config;
+
+    config.pre_amplifier.enabled = false;
+    config.high_pass_filter.enabled = false;
+    config.echo_canceller.enabled = true;
+    config.echo_canceller.mobile_mode = false;
+    config.echo_canceller.use_legacy_aec = false;
+    config.noise_suppression.enabled = false;
+    config.noise_suppression.level = webrtc::AudioProcessing::Config::NoiseSuppression::kModerate;
+    config.voice_detection.enabled = false;
+    config.gain_controller1.enabled = false;
+    config.gain_controller2.enabled = false;
+    config.gain_controller2.fixed_digital.gain_db = 0.0f;
+    config.gain_controller2.adaptive_digital.enabled = false;
+    config.residual_echo_detector.enabled = true;
+    config.level_estimation.enabled = false;
+
+    _apm->ApplyConfig(config);
+}
+
+// rebuffer into 10ms chunks
+void AudioClient::processWebrtcFarEnd(const int16_t* samples, int numFrames, int numChannels, int sampleRate) {
+
+    const webrtc::StreamConfig streamConfig = webrtc::StreamConfig(sampleRate, numChannels);
+    const int numChunk = (int)streamConfig.num_frames();
+
+    static int32_t lastWarningHash = 0;
+    if (sampleRate > WEBRTC_SAMPLE_RATE_MAX || numChannels > WEBRTC_CHANNELS_MAX) {
+        if (lastWarningHash != ((sampleRate << 8) | numChannels)) {
+            lastWarningHash = ((sampleRate << 8) | numChannels);
+            qCWarning(audioclient) << "AEC not unsupported for output format: sampleRate =" << sampleRate << "numChannels =" << numChannels;
+        }
+        return;
+    }
+
+    while (numFrames > 0) {
+
+        // number of frames to fill
+        int numFill = std::min(numFrames, numChunk - _numFifoFarEnd);
+
+        // refill fifo
+        memcpy(&_fifoFarEnd[_numFifoFarEnd], samples, numFill * numChannels * sizeof(int16_t));
+        samples += numFill * numChannels;
+        numFrames -= numFill;
+        _numFifoFarEnd += numFill;
+
+        if (_numFifoFarEnd == numChunk) {
+
+            // convert audio format
+            float buffer[WEBRTC_CHANNELS_MAX][WEBRTC_FRAMES_MAX];
+            float* const buffers[WEBRTC_CHANNELS_MAX] = { buffer[0], buffer[1] };
+            deinterleaveToFloat(_fifoFarEnd, buffers, numChunk, numChannels);
+
+            // process one chunk
+            int error = _apm->ProcessReverseStream(buffers, streamConfig, streamConfig, buffers);
+            if (error != _apm->kNoError) {
+                qCWarning(audioclient) << "WebRTC ProcessReverseStream() returned ERROR:" << error;
+            }
+            _numFifoFarEnd = 0;
+        }
+    }
+}
+
+void AudioClient::processWebrtcNearEnd(int16_t* samples, int numFrames, int numChannels, int sampleRate) {
+
+    const webrtc::StreamConfig streamConfig = webrtc::StreamConfig(sampleRate, numChannels);
+    assert(numFrames == (int)streamConfig.num_frames());    // WebRTC requires exactly 10ms of input
+
+    static int32_t lastWarningHash = 0;
+    if (sampleRate > WEBRTC_SAMPLE_RATE_MAX || numChannels > WEBRTC_CHANNELS_MAX) {
+        if (lastWarningHash != ((sampleRate << 8) | numChannels)) {
+            lastWarningHash = ((sampleRate << 8) | numChannels);
+            qCWarning(audioclient) << "AEC not unsupported for input format: sampleRate =" << sampleRate << "numChannels =" << numChannels;
+        }
+        return;
+    }
+
+    // convert audio format
+    float buffer[WEBRTC_CHANNELS_MAX][WEBRTC_FRAMES_MAX];
+    float* const buffers[WEBRTC_CHANNELS_MAX] = { buffer[0], buffer[1] };
+    deinterleaveToFloat(samples, buffers, numFrames, numChannels);
+
+    // process one chunk
+    int error = _apm->ProcessStream(buffers, streamConfig, streamConfig, buffers);
+    if (error != _apm->kNoError) {
+        qCWarning(audioclient) << "WebRTC ProcessStream() returned ERROR:" << error;
+    } else {
+        // modify samples in-place
+        interleaveToInt16(buffers, samples, numFrames, numChannels);
+    }
+}
+
+#endif // WEBRTC_ENABLED
 
 void AudioClient::handleLocalEchoAndReverb(QByteArray& inputByteArray) {
     // If there is server echo, reverb will be applied to the recieved audio stream so no need to have it here.
@@ -1262,23 +1426,29 @@ void AudioClient::handleMicAudioInput() {
 
         _inputRingBuffer.readSamples(inputAudioSamples.get(), inputSamplesRequired);
 
-        // detect loudness and clipping on the raw input
-        bool isClipping = false;
-        float loudness = computeLoudness(inputAudioSamples.get(), inputSamplesRequired, _inputFormat.channelCount(), isClipping);
+        // detect clipping on the raw input
+        bool isClipping = detectClipping(inputAudioSamples.get(), inputSamplesRequired, _inputFormat.channelCount());
+        if (isClipping) {
+            _timeSinceLastClip = 0.0f;
+        } else if (_timeSinceLastClip >= 0.0f) {
+            _timeSinceLastClip += AudioConstants::NETWORK_FRAME_SECS;
+        }
+        isClipping = (_timeSinceLastClip >= 0.0f) && (_timeSinceLastClip < 2.0f);  // 2 second hold time
+
+#if defined(WEBRTC_ENABLED)
+        if (_isAECEnabled) {
+            processWebrtcNearEnd(inputAudioSamples.get(), inputSamplesRequired / _inputFormat.channelCount(),
+                                 _inputFormat.channelCount(), _inputFormat.sampleRate());
+        }
+#endif
+
+        float loudness = computeLoudness(inputAudioSamples.get(), inputSamplesRequired);
         _lastRawInputLoudness = loudness;
 
         // envelope detection
         float tc = (loudness > _lastSmoothedRawInputLoudness) ? 0.378f : 0.967f;  // 10ms attack, 300ms release @ 100Hz
         loudness += tc * (_lastSmoothedRawInputLoudness - loudness);
         _lastSmoothedRawInputLoudness = loudness;
-
-        // clipping indicator
-        if (isClipping) {
-            _timeSinceLastClip = 0.0f;
-        } else if (_timeSinceLastClip >= 0.0f) {
-            _timeSinceLastClip += AudioConstants::NETWORK_FRAME_SECS;
-        }
-        isClipping = (_timeSinceLastClip >= 0.0f) && (_timeSinceLastClip < 2.0f);   // 2 second hold time
 
         emit inputLoudnessChanged(_lastSmoothedRawInputLoudness, isClipping);
 
@@ -1302,7 +1472,7 @@ void AudioClient::handleDummyAudioInput() {
         ? AudioConstants::NETWORK_FRAME_BYTES_STEREO
         : AudioConstants::NETWORK_FRAME_BYTES_PER_CHANNEL;
 
-    QByteArray audioBuffer(numNetworkBytes, 0); // silent
+    QByteArray audioBuffer(numNetworkBytes, 0);  // silent
     handleAudioInput(audioBuffer);
 }
 
@@ -1447,7 +1617,7 @@ bool AudioClient::mixLocalAudioInjectors(float* mixBuffer) {
                     // direct mix into mixBuffer
                     injector->getLocalHRTF().mixStereo(_localScratchBuffer, mixBuffer, gain,
                                                        AudioConstants::NETWORK_FRAME_SAMPLES_PER_CHANNEL);
-                } else {    // injector is mono
+                } else {  // injector is mono
 
                     if (options.positionSet) {
 
@@ -1574,9 +1744,18 @@ void AudioClient::setWarnWhenMuted(bool enable, bool emitSignal) {
     }
 }
 
+void AudioClient::setAcousticEchoCancellation(bool enable, bool emitSignal) {
+    if (_isAECEnabled != enable) {
+        _isAECEnabled = enable;
+        if (emitSignal) {
+            emit acousticEchoCancellationChanged(_isAECEnabled);
+        }
+    }
+}
+
 bool AudioClient::setIsStereoInput(bool isStereoInput) {
     bool stereoInputChanged = false;
-    if (isStereoInput != _isStereoInput && _inputDeviceInfo.supportedChannelCounts().contains(2)) {
+    if (isStereoInput != _isStereoInput && _inputDeviceInfo.getDevice().supportedChannelCounts().contains(2)) {
         _isStereoInput = isStereoInput;
         stereoInputChanged = true;
 
@@ -1638,17 +1817,18 @@ void AudioClient::outputFormatChanged() {
     _receivedAudioStream.outputFormatChanged(_outputFormat.sampleRate(), OUTPUT_CHANNEL_COUNT);
 }
 
-bool AudioClient::switchInputToAudioDevice(const QAudioDeviceInfo inputDeviceInfo, bool isShutdownRequest) {
+bool AudioClient::switchInputToAudioDevice(const HifiAudioDeviceInfo inputDeviceInfo, bool isShutdownRequest) {
     Q_ASSERT_X(QThread::currentThread() == thread(), Q_FUNC_INFO, "Function invoked on wrong thread");
 
-    qCDebug(audioclient) << __FUNCTION__ << "inputDeviceInfo: [" << inputDeviceInfo.deviceName() << "]";
+    qCDebug(audioclient) << __FUNCTION__ << "_inputDeviceInfo: [" << _inputDeviceInfo.deviceName() << ":" << _inputDeviceInfo.getDevice().deviceName() 
+        << "-- inputDeviceInfo:" << inputDeviceInfo.deviceName() << ":" << inputDeviceInfo.getDevice().deviceName() << "]";
     bool supportedFormat = false;
 
     // NOTE: device start() uses the Qt internal device list
     Lock lock(_deviceMutex);
 
 #if defined(Q_OS_ANDROID)
-    _shouldRestartInputSetup = false; // avoid a double call to _audioInput->start() from audioInputStateChanged
+    _shouldRestartInputSetup = false;  // avoid a double call to _audioInput->start() from audioInputStateChanged
 #endif
 
     // cleanup any previously initialized device
@@ -1663,7 +1843,7 @@ bool AudioClient::switchInputToAudioDevice(const QAudioDeviceInfo inputDeviceInf
         _audioInput = NULL;
         _numInputCallbackBytes = 0;
 
-        _inputDeviceInfo = QAudioDeviceInfo();
+        _inputDeviceInfo.setDevice(QAudioDeviceInfo());
     }
 
     if (_dummyAudioInput) {
@@ -1694,12 +1874,14 @@ bool AudioClient::switchInputToAudioDevice(const QAudioDeviceInfo inputDeviceInf
         return true;
     }
 
-    if (!inputDeviceInfo.isNull()) {
-        qCDebug(audioclient) << "The audio input device " << inputDeviceInfo.deviceName() << "is available.";
+    if (!inputDeviceInfo.getDevice().isNull()) {
+        qCDebug(audioclient) << "The audio input device" << inputDeviceInfo.deviceName() << ":" << inputDeviceInfo.getDevice().deviceName() << "is available.";
+      
+        //do not update UI that we're changing devices if default or same device
         _inputDeviceInfo = inputDeviceInfo;
-        emit deviceChanged(QAudio::AudioInput, inputDeviceInfo);
+        emit deviceChanged(QAudio::AudioInput, _inputDeviceInfo);
 
-        if (adjustedFormatForAudioDevice(inputDeviceInfo, _desiredInputFormat, _inputFormat)) {
+        if (adjustedFormatForAudioDevice(_inputDeviceInfo.getDevice(), _desiredInputFormat, _inputFormat)) {
             qCDebug(audioclient) << "The format to be used for audio input is" << _inputFormat;
 
             // we've got the best we can get for input
@@ -1724,7 +1906,7 @@ bool AudioClient::switchInputToAudioDevice(const QAudioDeviceInfo inputDeviceInf
 
             // if the user wants stereo but this device can't provide then bail
             if (!_isStereoInput || _inputFormat.channelCount() == 2) {
-                _audioInput = new QAudioInput(inputDeviceInfo, _inputFormat, this);
+                _audioInput = new QAudioInput(_inputDeviceInfo.getDevice(), _inputFormat, this);
                 _numInputCallbackBytes = calculateNumberOfInputCallbackBytes(_inputFormat);
                 _audioInput->setBufferSize(_numInputCallbackBytes);
                 // different audio input devices may have different volumes
@@ -1746,7 +1928,7 @@ bool AudioClient::switchInputToAudioDevice(const QAudioDeviceInfo inputDeviceInf
                     connect(_inputDevice, SIGNAL(readyRead()), this, SLOT(handleMicAudioInput()));
                     supportedFormat = true;
                 } else {
-                    qCDebug(audioclient) << "Error starting audio input -" <<  _audioInput->error();
+                    qCDebug(audioclient) << "Error starting audio input -" << _audioInput->error();
                     _audioInput->deleteLater();
                     _audioInput = NULL;
                 }
@@ -1759,7 +1941,7 @@ bool AudioClient::switchInputToAudioDevice(const QAudioDeviceInfo inputDeviceInf
     // This enables clients without a mic to still receive an audio stream from the mixer.
     if (!_audioInput) {
         qCDebug(audioclient) << "Audio input device is not available, using dummy input.";
-        _inputDeviceInfo = QAudioDeviceInfo();
+        _inputDeviceInfo.setDevice(QAudioDeviceInfo());
         emit deviceChanged(QAudio::AudioInput, _inputDeviceInfo);
 
         _inputFormat = _desiredInputFormat;
@@ -1815,11 +1997,11 @@ void AudioClient::checkInputTimeout() {
 
 void AudioClient::setHeadsetPluggedIn(bool pluggedIn) {
 #if defined(Q_OS_ANDROID)
-    if (pluggedIn == !_isHeadsetPluggedIn && !_inputDeviceInfo.isNull()) {
-        QAndroidJniObject brand =  QAndroidJniObject::getStaticObjectField<jstring>("android/os/Build", "BRAND");
+    if (pluggedIn == !_isHeadsetPluggedIn && !_inputDeviceInfo.getDevice().isNull()) {
+        QAndroidJniObject brand = QAndroidJniObject::getStaticObjectField<jstring>("android/os/Build", "BRAND");
         // some samsung phones needs more time to shutdown the previous input device
         if (brand.toString().contains("samsung", Qt::CaseInsensitive)) {
-            switchInputToAudioDevice(QAudioDeviceInfo(), true);
+            switchInputToAudioDevice(HifiAudioDeviceInfo(), true);
             QThread::msleep(200);
         }
 
@@ -1827,9 +2009,9 @@ void AudioClient::setHeadsetPluggedIn(bool pluggedIn) {
         bool aecEnabled = enableAEC.get();
 
         if ((pluggedIn || !aecEnabled) && _inputDeviceInfo.deviceName() != VOICE_RECOGNITION) {
-            switchAudioDevice(QAudio::AudioInput, VOICE_RECOGNITION);
+            switchAudioDevice(QAudio::AudioInput, VOICE_RECOGNITION, false);
         } else if (!pluggedIn && aecEnabled && _inputDeviceInfo.deviceName() != VOICE_COMMUNICATION) {
-            switchAudioDevice(QAudio::AudioInput, VOICE_COMMUNICATION);
+            switchAudioDevice(QAudio::AudioInput, VOICE_COMMUNICATION, false);
         }
     }
     _isHeadsetPluggedIn = pluggedIn;
@@ -1866,10 +2048,17 @@ void AudioClient::outputNotify() {
     }
 }
 
-bool AudioClient::switchOutputToAudioDevice(const QAudioDeviceInfo outputDeviceInfo, bool isShutdownRequest) {
-    Q_ASSERT_X(QThread::currentThread() == thread(), Q_FUNC_INFO, "Function invoked on wrong thread");
+void AudioClient::noteAwakening() {
+    qCDebug(audioclient) << "Restarting the audio devices.";
+    switchInputToAudioDevice(_inputDeviceInfo); 
+    switchOutputToAudioDevice(_outputDeviceInfo);
+}
 
-    qCDebug(audioclient) << "AudioClient::switchOutputToAudioDevice() outputDeviceInfo: [" << outputDeviceInfo.deviceName() << "]";
+bool AudioClient::switchOutputToAudioDevice(const HifiAudioDeviceInfo outputDeviceInfo, bool isShutdownRequest) {
+    Q_ASSERT_X(QThread::currentThread() == thread(), Q_FUNC_INFO, "Function invoked on wrong thread");
+    
+    qCDebug(audioclient) << __FUNCTION__ << "_outputdeviceInfo: [" << _outputDeviceInfo.deviceName() << ":" << _outputDeviceInfo.getDevice().deviceName()
+        << "-- outputDeviceInfo:" << outputDeviceInfo.deviceName() << ":" << outputDeviceInfo.getDevice().deviceName() << "]";
     bool supportedFormat = false;
 
     // NOTE: device start() uses the Qt internal device list
@@ -1877,6 +2066,11 @@ bool AudioClient::switchOutputToAudioDevice(const QAudioDeviceInfo outputDeviceI
 
     Lock localAudioLock(_localAudioMutex);
     _localSamplesAvailable.exchange(0, std::memory_order_release);
+
+    //wait on local injectors prep to finish running
+    if ( !_localPrepInjectorFuture.isFinished()) {
+        _localPrepInjectorFuture.waitForFinished();
+    }
 
     // cleanup any previously initialized device
     if (_audioOutput) {
@@ -1901,8 +2095,8 @@ bool AudioClient::switchOutputToAudioDevice(const QAudioDeviceInfo outputDeviceI
 
         delete[] _localOutputMixBuffer;
         _localOutputMixBuffer = NULL;
-
-        _outputDeviceInfo = QAudioDeviceInfo();
+        
+        _outputDeviceInfo.setDevice(QAudioDeviceInfo());
     }
 
     // cleanup any resamplers
@@ -1926,12 +2120,14 @@ bool AudioClient::switchOutputToAudioDevice(const QAudioDeviceInfo outputDeviceI
         return true;
     }
 
-    if (!outputDeviceInfo.isNull()) {
-        qCDebug(audioclient) << "The audio output device " << outputDeviceInfo.deviceName() << "is available.";
+    if (!outputDeviceInfo.getDevice().isNull()) {
+        qCDebug(audioclient) << "The audio output device" << outputDeviceInfo.deviceName() << ":" << outputDeviceInfo.getDevice().deviceName() << "is available.";
+        
+        //do not update UI that we're changing devices if default or same device
         _outputDeviceInfo = outputDeviceInfo;
-        emit deviceChanged(QAudio::AudioOutput, outputDeviceInfo);
+        emit deviceChanged(QAudio::AudioOutput, _outputDeviceInfo);
 
-        if (adjustedFormatForAudioDevice(outputDeviceInfo, _desiredOutputFormat, _outputFormat)) {
+        if (adjustedFormatForAudioDevice(_outputDeviceInfo.getDevice(), _desiredOutputFormat, _outputFormat)) {
             qCDebug(audioclient) << "The format to be used for audio output is" << _outputFormat;
 
             // we've got the best we can get for input
@@ -1953,7 +2149,7 @@ bool AudioClient::switchOutputToAudioDevice(const QAudioDeviceInfo outputDeviceI
             outputFormatChanged();
 
             // setup our general output device for audio-mixer audio
-            _audioOutput = new QAudioOutput(outputDeviceInfo, _outputFormat, this);
+            _audioOutput = new QAudioOutput(_outputDeviceInfo.getDevice(), _outputFormat, this);
 
             int deviceChannelCount = _outputFormat.channelCount();
             int frameSize = (AudioConstants::NETWORK_FRAME_SAMPLES_PER_CHANNEL * deviceChannelCount * _outputFormat.sampleRate()) / _desiredOutputFormat.sampleRate();
@@ -2005,7 +2201,7 @@ bool AudioClient::switchOutputToAudioDevice(const QAudioDeviceInfo outputDeviceI
             localAudioLock.unlock();
 
             // setup a loopback audio output device
-            _loopbackAudioOutput = new QAudioOutput(outputDeviceInfo, _outputFormat, this);
+            _loopbackAudioOutput = new QAudioOutput(outputDeviceInfo.getDevice(), _outputFormat, this);
 
             _timeSinceLastReceived.start();
 
@@ -2079,7 +2275,7 @@ float AudioClient::azimuthForSource(const glm::vec3& relativePosition) {
 
         // produce an oriented angle about the y-axis
         glm::vec3 direction = rotatedSourcePosition * (1.0f / fastSqrtf(rotatedSourcePositionLength2));
-        float angle = fastAcosf(glm::clamp(-direction.z, -1.0f, 1.0f)); // UNIT_NEG_Z is "forward"
+        float angle = fastAcosf(glm::clamp(-direction.z, -1.0f, 1.0f));  // UNIT_NEG_Z is "forward"
         return (direction.x < 0.0f) ? -angle : angle;
 
     } else {
@@ -2107,15 +2303,16 @@ qint64 AudioClient::AudioOutputIODevice::readData(char * data, qint64 maxSize) {
         return maxSize;
     }
 
-    // samples requested from OUTPUT_CHANNEL_COUNT
+    // max samples requested from OUTPUT_CHANNEL_COUNT
     int deviceChannelCount = _audio->_outputFormat.channelCount();
-    int samplesRequested = (int)(maxSize / AudioConstants::SAMPLE_SIZE) * OUTPUT_CHANNEL_COUNT / deviceChannelCount;
+    int maxSamplesRequested = (int)(maxSize / AudioConstants::SAMPLE_SIZE) * OUTPUT_CHANNEL_COUNT / deviceChannelCount;
     // restrict samplesRequested to the size of our mix/scratch buffers
-    samplesRequested = std::min(samplesRequested, _audio->_outputPeriod);
+    maxSamplesRequested = std::min(maxSamplesRequested, _audio->_outputPeriod);
 
     int16_t* scratchBuffer = _audio->_outputScratchBuffer;
     float* mixBuffer = _audio->_outputMixBuffer;
 
+    int samplesRequested = maxSamplesRequested;
     int networkSamplesPopped;
     if ((networkSamplesPopped = _receivedAudioStream.popSamples(samplesRequested, false)) > 0) {
         qCDebug(audiostream, "Read %d samples from buffer (%d available, %d requested)", networkSamplesPopped, _receivedAudioStream.getSamplesAvailable(), samplesRequested);
@@ -2153,52 +2350,52 @@ qint64 AudioClient::AudioOutputIODevice::readData(char * data, qint64 maxSize) {
             qCDebug(audiostream, "Read %d samples from injectors (%d available, %d requested)", injectorSamplesPopped, _localInjectorsStream.samplesAvailable(), samplesRequested);
         }
     }
-
+    
     // prepare injectors for the next callback
-    QtConcurrent::run(QThreadPool::globalInstance(), [this] {
+     _audio->_localPrepInjectorFuture = QtConcurrent::run(QThreadPool::globalInstance(), [this] {
         _audio->prepareLocalAudioInjectors();
     });
 
     int samplesPopped = std::max(networkSamplesPopped, injectorSamplesPopped);
-    int framesPopped = samplesPopped / AudioConstants::STEREO;
-    int bytesWritten;
-    if (samplesPopped > 0) {
-
-        // apply output gain
-        float newGain = _audio->_outputGain.load(std::memory_order_acquire);
-        float oldGain = _audio->_lastOutputGain;
-        _audio->_lastOutputGain = newGain;
-
-        applyGainSmoothing<OUTPUT_CHANNEL_COUNT>(mixBuffer, framesPopped, oldGain, newGain);
-
-        if (deviceChannelCount == OUTPUT_CHANNEL_COUNT) {
-            // limit the audio
-            _audio->_audioLimiter.render(mixBuffer, (int16_t*)data, framesPopped);
-        } else {
-            _audio->_audioLimiter.render(mixBuffer, scratchBuffer, framesPopped);
-
-            // upmix or downmix to deviceChannelCount
-            if (deviceChannelCount > OUTPUT_CHANNEL_COUNT) {
-                int extraChannels = deviceChannelCount - OUTPUT_CHANNEL_COUNT;
-                channelUpmix(scratchBuffer, (int16_t*)data, samplesPopped, extraChannels);
-            } else {
-                channelDownmix(scratchBuffer, (int16_t*)data, samplesPopped);
-            }
-        }
-
-        bytesWritten = framesPopped * AudioConstants::SAMPLE_SIZE * deviceChannelCount;
-        assert(bytesWritten <= maxSize);
-
-    } else {
-        // nothing on network, don't grab anything from injectors, and just return 0s
-        memset(data, 0, maxSize);
-        bytesWritten = maxSize;
+    if (samplesPopped == 0) {
+        // nothing on network, don't grab anything from injectors, and fill with silence
+        samplesPopped = maxSamplesRequested;
+        memset(mixBuffer, 0, samplesPopped * sizeof(float));
     }
+    int framesPopped = samplesPopped / OUTPUT_CHANNEL_COUNT;
+
+    // apply output gain
+    float newGain = _audio->_outputGain.load(std::memory_order_acquire);
+    float oldGain = _audio->_lastOutputGain;
+    _audio->_lastOutputGain = newGain;
+
+    applyGainSmoothing<OUTPUT_CHANNEL_COUNT>(mixBuffer, framesPopped, oldGain, newGain);
+
+    // limit the audio
+    _audio->_audioLimiter.render(mixBuffer, scratchBuffer, framesPopped);
+
+#if defined(WEBRTC_ENABLED)
+    if (_audio->_isAECEnabled) {
+        _audio->processWebrtcFarEnd(scratchBuffer, framesPopped, OUTPUT_CHANNEL_COUNT, _audio->_outputFormat.sampleRate());
+    }
+#endif
+
+    // if required, upmix or downmix to deviceChannelCount
+    if (deviceChannelCount == OUTPUT_CHANNEL_COUNT) {
+        memcpy(data, scratchBuffer, samplesPopped * AudioConstants::SAMPLE_SIZE);
+    } else if (deviceChannelCount > OUTPUT_CHANNEL_COUNT) {
+        int extraChannels = deviceChannelCount - OUTPUT_CHANNEL_COUNT;
+        channelUpmix(scratchBuffer, (int16_t*)data, samplesPopped, extraChannels);
+    } else {
+        channelDownmix(scratchBuffer, (int16_t*)data, samplesPopped);
+    }
+    int bytesWritten = framesPopped * AudioConstants::SAMPLE_SIZE * deviceChannelCount;
+    assert(bytesWritten <= maxSize);
 
     // send output buffer for recording
     if (_audio->_isRecording) {
         Lock lock(_recordMutex);
-        _audio->_audioFileWav.addRawAudioChunk(reinterpret_cast<char*>(scratchBuffer), bytesWritten);
+        _audio->_audioFileWav.addRawAudioChunk(data, bytesWritten);
     }
 
     int bytesAudioOutputUnplayed = _audio->_audioOutput->bufferSize() - _audio->_audioOutput->bytesFree();

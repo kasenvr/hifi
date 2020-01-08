@@ -10,12 +10,12 @@
 
 #include <AudioClient.h>
 #include <avatar/AvatarManager.h>
-#include <devices/DdeFaceTracker.h>
 #include <ScriptEngines.h>
 #include <OffscreenUi.h>
 #include <Preferences.h>
 #include <plugins/PluginUtils.h>
 #include <display-plugins/CompositorHelper.h>
+#include <display-plugins/hmd/HmdDisplayPlugin.h>
 #include "scripting/RenderScriptingInterface.h"
 #include "Application.h"
 #include "DialogsManager.h"
@@ -57,18 +57,19 @@ void setupPreferences() {
     static const QString GRAPHICS_QUALITY { "Graphics Quality" };
     {
         auto getter = []()->float {
-            return DependencyManager::get<LODManager>()->getWorldDetailQuality();
+            return (int)DependencyManager::get<LODManager>()->getWorldDetailQuality();
         };
 
-        auto setter = [](float value) {
-            DependencyManager::get<LODManager>()->setWorldDetailQuality(value);
+        auto setter = [](int value) {
+            DependencyManager::get<LODManager>()->setWorldDetailQuality(static_cast<WorldDetailQuality>(value));
         };
 
-        auto wodSlider = new SliderPreference(GRAPHICS_QUALITY, "World Detail", getter, setter);
-        wodSlider->setMin(0.25f);
-        wodSlider->setMax(0.75f);
-        wodSlider->setStep(0.25f);
-        preferences->addPreference(wodSlider);
+        auto wodButtons = new RadioButtonsPreference(GRAPHICS_QUALITY, "World Detail", getter, setter);
+        QStringList items;
+        items << "Low World Detail" << "Medium World Detail" << "High World Detail";
+        wodButtons->setHeading("World Detail");
+        wodButtons->setItems(items);
+        preferences->addPreference(wodButtons);
 
         auto getterShadow = []()->bool {
             auto menu = Menu::getInstance();
@@ -101,6 +102,16 @@ void setupPreferences() {
 
         preference->setItems(refreshRateProfiles);
         preferences->addPreference(preference);
+
+        auto getterMaterialProceduralShaders = []() -> bool {
+            auto menu = Menu::getInstance();
+            return menu->isOptionChecked(MenuOption::MaterialProceduralShaders);
+        };
+        auto setterMaterialProceduralShaders = [](bool value) {
+            auto menu = Menu::getInstance();
+            menu->setIsOptionChecked(MenuOption::MaterialProceduralShaders, value);
+        };
+        preferences->addPreference(new CheckPreference(GRAPHICS_QUALITY, "Enable Procedural Materials", getterMaterialProceduralShaders, setterMaterialProceduralShaders));
     }
     {
         // Expose the Viewport Resolution Scale
@@ -284,22 +295,6 @@ void setupPreferences() {
         preferences->addPreference(preference);
     }
 
-    static const QString FACE_TRACKING{ "Face Tracking" };
-    {
-#ifdef HAVE_DDE
-        auto getter = []()->float { return DependencyManager::get<DdeFaceTracker>()->getEyeClosingThreshold(); };
-        auto setter = [](float value) { DependencyManager::get<DdeFaceTracker>()->setEyeClosingThreshold(value); };
-        preferences->addPreference(new SliderPreference(FACE_TRACKING, "Eye Closing Threshold", getter, setter));
-#endif
-    }
-
-
-    {
-        auto getter = []()->float { return FaceTracker::getEyeDeflection(); };
-        auto setter = [](float value) { FaceTracker::setEyeDeflection(value); };
-        preferences->addPreference(new SliderPreference(FACE_TRACKING, "Eye Deflection", getter, setter));
-    }
-
     static const QString VR_MOVEMENT{ "VR Movement" };
     {
         auto getter = [myAvatar]()->bool { return myAvatar->getAllowTeleporting(); };
@@ -375,6 +370,33 @@ void setupPreferences() {
         preference->setMax(30.0f);
         preference->setStep(1);
         preference->setDecimals(2);
+        preferences->addPreference(preference);
+    }
+    {
+        auto getter = []()->bool {
+            return qApp->getVisionSqueeze().getVisionSqueezeEnabled();
+        };
+        auto setter = [](bool value) {
+            qApp->getVisionSqueeze().setVisionSqueezeEnabled(value);
+        };
+        auto preference = new CheckPreference(VR_MOVEMENT, "Enable HMD Comfort Mode", getter, setter);
+        preferences->addPreference(preference);
+    }
+    {
+        const float sliderPositions = 5.0f;
+        auto getter = [sliderPositions]()->float {
+            return roundf(sliderPositions * qApp->getVisionSqueeze().getVisionSqueezeRatioX());
+        };
+        auto setter = [sliderPositions](float value) {
+            float ratio = value / sliderPositions;
+            qApp->getVisionSqueeze().setVisionSqueezeRatioX(ratio);
+            qApp->getVisionSqueeze().setVisionSqueezeRatioY(ratio);
+        };
+        auto preference = new SpinnerSliderPreference(VR_MOVEMENT, "Comfort Mode", getter, setter);
+        preference->setMin(0.0f);
+        preference->setMax(sliderPositions);
+        preference->setStep(1.0f);
+        preference->setDecimals(0);
         preferences->addPreference(preference);
     }
     {

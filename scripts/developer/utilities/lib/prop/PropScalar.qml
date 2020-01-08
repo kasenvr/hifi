@@ -1,5 +1,5 @@
 //
-//  PropItem.qml
+//  PropScalar.qml
 //
 //  Created by Sam Gateau on 3/2/2019
 //  Copyright 2019 High Fidelity, Inc.
@@ -32,9 +32,7 @@ PropItem {
     property var sourceValueVar: root.valueVarGetter()
 
     function applyValueVarFromWidgets(value) {
-        if (!root.readOnly) { 
-           root.valueVarSetter(value)
-        }
+        root.valueVarSetter(value)
     }
 
     PropLabel {
@@ -42,8 +40,8 @@ PropItem {
         enabled: root.showValue
 
         anchors.left: root.splitter.right
+        anchors.right: (root.readOnly ? root.right : sliderControl.left)
         anchors.verticalCenter: root.verticalCenter
-        width: root.width * (root.readOnly ? 1.0 : global.valueAreaWidthScale)
         horizontalAlignment: global.valueTextAlign
         height: global.slimHeight
         
@@ -55,17 +53,26 @@ PropItem {
             border.width: global.valueBorderWidth
             radius: global.valueBorderRadius
         }
+
+        MouseArea{
+            id: mousearea
+            enabled: !root.readOnly
+            anchors.fill: parent
+            onDoubleClicked: { sliderControl.visible = !sliderControl.visible }
+        }
     }
 
     HifiControls.Slider {
         id: sliderControl
         visible: !root.readOnly
+
         stepSize: root.integral ? 1.0 : 0.0
-        anchors.left: valueLabel.right
-        anchors.right: root.right
-        anchors.verticalCenter: root.verticalCenter
         value: root.sourceValueVar
         onValueChanged: { applyValueVarFromWidgets(value) }
+
+        width: root.width * (root.readOnly ? 0.0 : global.handleAreaWidthScale)
+        anchors.right: root.right
+        anchors.verticalCenter: root.verticalCnter
     }
 
     

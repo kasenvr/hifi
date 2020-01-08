@@ -78,6 +78,8 @@ public:
 
     bool isAssetServerEnabled();
 
+    void screensharePresence(QString roomname, QUuid avatarID, int expiration_seconds = 0);
+
 public slots:
     /// Called by NodeList to inform us a node has been added
     void nodeAdded(SharedNodePointer node);
@@ -96,10 +98,11 @@ private slots:
     void processNodeDisconnectRequestPacket(QSharedPointer<ReceivedMessage> message);
     void processICEServerHeartbeatDenialPacket(QSharedPointer<ReceivedMessage> message);
     void processICEServerHeartbeatACK(QSharedPointer<ReceivedMessage> message);
+    void processAvatarZonePresencePacket(QSharedPointer<ReceivedMessage> packet);
 
     void handleDomainContentReplacementFromURLRequest(QSharedPointer<ReceivedMessage> message);
     void handleOctreeFileReplacementRequest(QSharedPointer<ReceivedMessage> message);
-    void handleOctreeFileReplacement(QByteArray octreeFile);
+    bool handleOctreeFileReplacement(QByteArray octreeFile, QString sourceFilename, QString name, QString username);
 
     void processOctreeDataRequestMessage(QSharedPointer<ReceivedMessage> message);
     void processOctreeDataPersistMessage(QSharedPointer<ReceivedMessage> message);
@@ -129,12 +132,17 @@ private slots:
     void handleSuccessfulICEServerAddressUpdate(QNetworkReply* requestReply);
     void handleFailedICEServerAddressUpdate(QNetworkReply* requestReply);
 
+    void handleSuccessfulScreensharePresence(QNetworkReply* requestReply, QJsonObject callbackData);
+    void handleFailedScreensharePresence(QNetworkReply* requestReply);
+
     void updateReplicatedNodes();
     void updateDownstreamNodes();
     void updateUpstreamNodes();
 
     void tokenGrantFinished();
     void profileRequestFinished();
+
+    void aboutToQuit();
 
 signals:
     void iceServerChanged();
@@ -194,7 +202,7 @@ private:
     QUrl oauthRedirectURL();
     QUrl oauthAuthorizationURL(const QUuid& stateUUID = QUuid::createUuid());
 
-    bool isAuthenticatedRequest(HTTPConnection* connection, const QUrl& url);
+    std::pair<bool, QString>  isAuthenticatedRequest(HTTPConnection* connection);
 
     QNetworkReply* profileRequestGivenTokenReply(QNetworkReply* tokenReply);
     Headers setupCookieHeadersFromProfileReply(QNetworkReply* profileReply);
@@ -236,6 +244,7 @@ private:
 
     bool _isUsingDTLS { false };
 
+    bool _oauthEnable { false };
     QUrl _oauthProviderURL;
     QString _oauthClientID;
     QString _oauthClientSecret;

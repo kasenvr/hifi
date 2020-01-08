@@ -59,6 +59,7 @@ protected:
     BOOL getTextFormat(int ResID, TextFormat& formatOut);
     void showWindows(std::vector<CStatic*> windows, bool show);
     POINT getMouseCoords(MSG* pMsg);
+    void MarkWindowAsUnpinnable();
 
 
     bool _isConsoleRunning { false };
@@ -93,6 +94,8 @@ protected:
     CStatic* m_orgname_banner;
     CStatic* m_username_banner;
     CStatic* m_password_banner;
+
+    CStatic* m_version;
 
     HWND _applicationWND { 0 };
 
